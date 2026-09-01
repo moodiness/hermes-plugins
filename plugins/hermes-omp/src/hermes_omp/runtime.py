@@ -184,8 +184,15 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
         line_buffer=RpcLineBuffer()
+        exit_drain_deadline: Optional[float]=None
+        post_exit_bytes=0
         while child.poll() is None or selector.get_map():
-            for key,_ in selector.select(timeout=.1):
+            if child.poll() is not None:
+                if exit_drain_deadline is None:
+                    exit_drain_deadline=time.monotonic()+.25
+                elif time.monotonic() >= exit_drain_deadline:
+                    break
+            for key,_ in selector.select(timeout=.05):
                 while True:
                     data=os.read(key.fileobj.fileno(),65536)
                     if not data:
@@ -206,6 +213,10 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                         text=_event_text(event)
                         if text:
                             eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
+                    if exit_drain_deadline is not None:
+                        post_exit_bytes += len(data)
+                        if post_exit_bytes >= 1024*1024:
+                            selector.unregister(key.fileobj)
                     break
             prompts=Outbox(paths.run/f"{session.name}.prompts.json")
             for item in prompts.due():
@@ -224,13 +235,16 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                 try: bridge.deliver(item.payload); outbox.ack(item.id)
                 except Exception as exc: outbox.fail(item.id,error=str(exc))
         selector.close()
+        child.stdout.close()
         try:
             child.stdin.close()
         except (BrokenPipeError,OSError):
             pass
         residue=line_buffer.finish()
         if residue:
-            event={"type":"unparsed","content":str(redact(residue))}
+            try: content=json.dumps(redact(json.loads(residue)),ensure_ascii=False)
+            except (json.JSONDecodeError,TypeError): content=str(redact(residue))
+            event={"type":"unparsed","content":content}
             with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
         for item in outbox.due():
             try: bridge.deliver(item.payload); outbox.ack(item.id)

@@ -10,48 +10,84 @@ from pathlib import Path
 import pytest
 
 from hermes_omp.core import Paths, Session, SessionStore
+from hermes_omp.bridge import HermesSendBridge
 from hermes_omp.runtime import RpcLineBuffer, Runtime, acquire_owner_lock, build_omp_command, inspect_adoption, run
 
 def _write_transactional_fake(tmp_path: Path) -> Path:
-    fake = tmp_path / "transactional-fake-omp"
+    fake = tmp_path / "transactional_fake_omp.py"
     fake.write_text(
-        """#!/usr/bin/env python3
-import json
+        """import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
-Path(os.environ["FAKE_OMP_PID"]).write_text(str(os.getpid()))
+done = Path(os.environ["FAKE_OMP_DONE"])
+
+def finish(code=0):
+    done.write_text(str(code))
+    raise SystemExit(code)
+
+def watchdog():
+    time.sleep(4)
+    done.write_text("watchdog")
+    os._exit(4)
+
+threading.Thread(target=watchdog, daemon=True).start()
+def close_stdin():
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        ctypes.windll.kernel32.CloseHandle(msvcrt.get_osfhandle(sys.stdin.fileno()))
+    else:
+        os.close(sys.stdin.fileno())
+
 mode = os.environ["FAKE_OMP_MODE"]
 for raw in sys.stdin.buffer:
     frame = json.loads(raw)
     if frame.get("type") == "prompt" and frame.get("id") == "initial":
         question = {"type":"extension_ui_request","id":"q","method":"select","title":"Pick","options":[{"label":"A"}]}
         if mode == "failure":
-            os.close(sys.stdin.fileno())
-            time.sleep(0.1)
-        os.write(sys.stdout.fileno(), json.dumps(question).encode() + b"\\n")
-        if mode == "failure":
-            time.sleep(1)
-            raise SystemExit(0)
+            close_stdin()
+            time.sleep(0.05)
+            print(json.dumps(question), flush=True)
+            time.sleep(0.5)
+            finish()
         if mode == "residue":
-            os.write(sys.stdout.fileno(), b'token=top-secret')
-            time.sleep(0.1)
-            raise SystemExit(0)
+            question["token"] = "top-secret"
+            sys.stdout.buffer.write(json.dumps(question).encode())
+            sys.stdout.buffer.flush()
+            finish()
+        if mode == "inherited_stdout":
+            code = """ + repr(
+                "import json, os, sys, time\n"
+                "from pathlib import Path\n"
+                "print(json.dumps({'type':'turn_end','content':'descendant-output'}), flush=True)\n"
+                "time.sleep(1.5)\n"
+                "Path(os.environ['FAKE_DESC_DONE']).write_text('done')\n"
+            ) + """
+            subprocess.Popen([sys.executable, "-c", code], stdout=sys.stdout, stderr=sys.stderr)
+            finish()
+        print(json.dumps(question), flush=True)
     elif frame.get("type") == "extension_ui_response":
         Path(os.environ["FAKE_OMP_OBSERVED"]).write_bytes(raw)
-        time.sleep(0.1)
-        raise SystemExit(0)
+        finish()
+finish()
 """,
         encoding="utf-8",
     )
-    fake.chmod(0o755)
     return fake
 
 
-def _transactional_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> tuple[Paths, Path, Path]:
+def _transactional_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> tuple[Paths, list[subprocess.Popen[str]], Path]:
     paths = Paths(tmp_path / "omp")
+    fake = _write_transactional_fake(tmp_path)
     session = Session.new(
         name="demo",
         cwd=str(tmp_path),
@@ -61,31 +97,45 @@ def _transactional_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode
         chat="42",
         topic="7",
         allowed_users=["9"],
+        omp_options=[str(fake)],
     )
     SessionStore(paths).save(session)
-    fake = _write_transactional_fake(tmp_path)
-    pid_path = tmp_path / "fake.pid"
     observed = tmp_path / "observed.jsonl"
-    monkeypatch.setenv("HERMES_OMP_BINARY", str(fake))
-    monkeypatch.setenv("HERMES_OMP_HERMES", "/bin/true")
+    children: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
     monkeypatch.setenv("FAKE_OMP_MODE", mode)
-    monkeypatch.setenv("FAKE_OMP_PID", str(pid_path))
+    monkeypatch.setenv("FAKE_OMP_DONE", str(tmp_path / "fake.done"))
     monkeypatch.setenv("FAKE_OMP_OBSERVED", str(observed))
+    monkeypatch.setenv("FAKE_DESC_DONE", str(tmp_path / "descendant.done"))
     inbox = paths.inbox / "demo"
     inbox.mkdir(parents=True, exist_ok=True)
     event = {"event_id":"e","question_id":"q","platform":"telegram","chat":"42","topic":"7","user":"9","answer":"1"}
     (inbox / "e.json").write_text(json.dumps(event), encoding="utf-8")
-    return paths, pid_path, observed
+    return paths, children, observed
 
 
-def _stop_fake(pid_path: Path) -> None:
-    if not pid_path.exists():
-        return
-    pid = int(pid_path.read_text())
-    try:
-        os.kill(pid, 15)
-    except ProcessLookupError:
-        return
+def _stop_fakes(children: list[subprocess.Popen[str]]) -> None:
+    for child in children:
+        try:
+            child.wait(timeout=0.5)
+            continue
+        except subprocess.TimeoutExpired:
+            child.terminate()
+        try:
+            child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=0.5)
 
 
 
@@ -143,7 +193,7 @@ def test_commit_response_rejects_a_different_pending_question(tmp_path: Path) ->
 
 
 def test_run_transactional_response_failed_flush_preserves_question_and_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths, pid_path, _ = _transactional_runtime(tmp_path, monkeypatch, "failure")
+    paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "failure")
     try:
         assert run("demo", paths=paths) == 0
         reloaded = Runtime(SessionStore(paths).load("demo"), paths, omp_path="fake")
@@ -152,11 +202,11 @@ def test_run_transactional_response_failed_flush_preserves_question_and_inbox(tm
         assert (paths.inbox / "demo" / "e.json").exists()
         assert not (paths.inbox / "demo" / "processed" / "e.json").exists()
     finally:
-        _stop_fake(pid_path)
+        _stop_fakes(children)
 
 
 def test_run_transactional_response_flushes_complete_frame_before_commit_and_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths, pid_path, observed = _transactional_runtime(tmp_path, monkeypatch, "success")
+    paths, children, observed = _transactional_runtime(tmp_path, monkeypatch, "success")
     original_commit = Runtime.commit_response
 
     def commit_after_child_observation(runtime: Runtime, question_id: str, event_id: str = "", now: float | None = None) -> None:
@@ -177,7 +227,7 @@ def test_run_transactional_response_flushes_complete_frame_before_commit_and_ack
         assert not (paths.inbox / "demo" / "e.json").exists()
         assert (paths.inbox / "demo" / "processed" / "e.json").exists()
     finally:
-        _stop_fake(pid_path)
+        _stop_fakes(children)
 
 
 def test_runtime_rejects_expired_question(tmp_path: Path) -> None:
@@ -241,16 +291,34 @@ def test_rpc_line_buffer_reconstructs_fragmented_multibyte_utf8() -> None:
     assert buffer.finish() == ""
 
 
-def test_run_logs_redacted_unparsed_eof_residue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths, pid_path, _ = _transactional_runtime(tmp_path, monkeypatch, "residue")
+def test_run_logs_valid_unterminated_rpc_as_redacted_residue_without_side_effects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "residue")
     try:
         assert run("demo", paths=paths) == 0
-        logged = (paths.logs / "demo.jsonl").read_text()
-        assert "top-secret" not in logged
-        assert '"type": "unparsed"' in logged
-        assert "token[REDACTED]" in logged
+        events = [json.loads(line) for line in (paths.logs / "demo.jsonl").read_text().splitlines()]
+        assert events == [{"type":"unparsed","content":'{"type": "extension_ui_request", "id": "q", "method": "select", "title": "Pick", "options": [{"label": "A"}], "token": "[REDACTED]"}'}]
+        assert not (paths.run / "demo.question.json").exists()
+        assert not (paths.outbox / "demo.json").exists()
     finally:
-        _stop_fake(pid_path)
+        _stop_fakes(children)
+
+
+def test_run_bounds_post_exit_drain_when_descendant_inherits_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "inherited_stdout")
+    descendant_done = tmp_path / "descendant.done"
+    started = time.monotonic()
+    try:
+        assert run("demo", paths=paths) == 0
+        assert time.monotonic() - started < 1.0
+        events = [json.loads(line) for line in (paths.logs / "demo.jsonl").read_text().splitlines()]
+        assert {"type":"turn_end","content":"descendant-output"} in events
+        assert children[0].stdout is not None and children[0].stdout.closed
+    finally:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not descendant_done.exists():
+            time.sleep(0.01)
+        assert descendant_done.exists()
+        _stop_fakes(children)
 
 
 
