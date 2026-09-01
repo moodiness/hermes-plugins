@@ -133,6 +133,8 @@ class SessionStore:
         path = self.paths.sessions / f"{slug(name)}.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             target = self.paths.quarantine / f"{path.stem}.{int(time.time_ns())}.json"
             os.replace(path, target)
@@ -159,6 +161,21 @@ class SessionStore:
         if not omp_session_id: return
         owners = [s.name for s in self.list() if s.omp_session_id == omp_session_id and s.name != except_name and s.status not in {"removed"}]
         if owners: raise ValueError(f"OMP session ID already owned by {owners[0]}")
+
+
+def validate_session(session: Session) -> list[str]:
+    errors: list[str] = []
+    try:
+        if slug(session.name) != session.name: errors.append("name must be a canonical slug")
+    except ValueError as exc: errors.append(str(exc))
+    if session.schema_version != SCHEMA_VERSION: errors.append(f"schema_version must be {SCHEMA_VERSION}")
+    if not session.id: errors.append("id is required")
+    if not Path(session.cwd).expanduser().is_dir(): errors.append("cwd does not exist")
+    if not session.model: errors.append("model is required")
+    if session.restart_policy not in {"never", "on-failure", "always"}: errors.append("invalid restart_policy")
+    if not isinstance(session.omp_options, list) or not all(isinstance(x, str) for x in session.omp_options): errors.append("omp_options must be strings")
+    if not isinstance(session.allowed_users, list) or not all(isinstance(x, str) for x in session.allowed_users): errors.append("allowed_users must be strings")
+    return errors
 
 
 @dataclasses.dataclass(frozen=True)
@@ -272,3 +289,10 @@ class Outbox:
                 else: x.next_attempt = stamp + min(60.0, self.base_delay * (2 ** (x.attempts - 1))) + self.jitter()
         self._save()
     def dead_letters(self) -> list[OutboxItem]: return [x for x in self.items if x.state == "dead"]
+    def retry(self, event_id: Optional[str] = None) -> list[str]:
+        retried = []
+        for item in self.items:
+            if item.state == "dead" and (event_id is None or item.id == event_id):
+                item.state = "pending"; item.attempts = 0; item.next_attempt = 0.0; item.error = ""; retried.append(item.id)
+        if retried: self._save()
+        return retried

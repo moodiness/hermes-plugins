@@ -79,10 +79,7 @@ def test_all_16_isolated_acceptance_scenarios(tmp_path: Path, monkeypatch) -> No
 
     # 13 graceful stop observed above; 14 exact resume; 15 duplicate refused.
     assert store.load("demo").omp_session_id=="fake-session-001"
-    try:
-        main(["create","duplicate","--cwd",str(project),"--model","fake","--mission","x","--resume","fake-session-001","--omp-path",str(fake_omp),"--no-install"])
-    except ValueError as exc: assert "already owned" in str(exc)
-    else: raise AssertionError("duplicate was accepted")
+    assert main(["create","duplicate","--cwd",str(project),"--model","fake","--mission","x","--resume","fake-session-001","--omp-path",str(fake_omp),"--no-install","--json"]) != 0
 
     # 16 clean temporary service removal.
     assert main(["remove","demo","--no-service"])==0

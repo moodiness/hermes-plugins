@@ -4,17 +4,20 @@ Standalone Hermes Agent plugin for durable Oh My Pi (OMP) RPC sessions. It keeps
 
 ## Status
 
-`0.1.0rc1`. macOS runtime and LaunchAgent behavior are validated locally. Linux systemd-user and Windows Task Scheduler definitions are unit-tested generators, not host-tested in this release candidate.
+`0.2.0rc1`. macOS runtime and LaunchAgent behavior are validated locally. Linux systemd-user and Windows Task Scheduler definitions are unit-tested generators, not host-tested in this release candidate.
 
 ## Install
 
 ```sh
-python -m pip install dist/hermes_omp-0.1.0rc1-py3-none-any.whl
-hermes plugins install ./plugin
+python -m pip install dist/hermes_omp-0.2.0rc1-py3-none-any.whl
+cp -r plugins/hermes-omp/plugin ~/.hermes/plugins/omp  # from hermes-plugins monorepo root
+hermes plugins enable omp
 hermes omp doctor --json
 ```
 
-The plugin directory contains `plugin.yaml` and registers `hermes omp` through `ctx.register_cli_command`; it does not patch Hermes core.
+This checkout is migration-ready for `plugins/hermes-omp/` in the `hermes-plugins` monorepo. Paths in plugin metadata and CI are plugin-relative; neither runtime nor tests assume the monorepo root is the package root. The self-contained `plugin/` directory contains `plugin.yaml` and `__init__.py`. Copy it from the plugin root into the active profile's user-plugin directory, enable `omp`, then run doctor. It registers `hermes omp` through the documented public `ctx.register_cli_command` surface; the official examples currently demonstrate slash-command/LLM/dashboard surfaces rather than this CLI surface, so no core patching or private imports are used.
+
+Its manifest follows official example conventions (`name`, quoted description, author, hooks, and declared `provides`), registration is typed, and command dispatch uses module logging for auditable start/failure/finish events without arguments, message bodies, routes, or secrets.
 
 ## Quick start
 
@@ -23,6 +26,8 @@ hermes omp create work --cwd ./project --model gpt-5.6-sol-pro --mission "Implem
 hermes omp status work --json
 hermes omp send work "Run the focused tests"
 hermes omp logs work --lines 100
+hermes omp events work --queue outbound,inbound --status dead,rejected --json
+hermes omp export work work.json --json
 hermes omp stop work
 ```
 
@@ -38,6 +43,10 @@ Never put credentials in these commands. Hermes owns channel credentials. See `d
 - `skills/omp-service/SKILL.md`: agent operating procedure.
 
 No code reads `state.db`, imports gateway internals, or calls Telegram APIs.
+
+## 0.2 operations
+
+Every user command supports `--json`; failures use stable exit codes: `1` operational, `2` usage, `3` not found, `4` conflict, and `5` validation. `events` inspects redacted prompt/outbound/inbound queues, `retry` explicitly requeues dead outbound items, and `status`/`list` report health, queue depths, activity, and last error. Portable versioned archives exclude secrets, PID state, and owner locks. `import` supports `fail`, `rename`, and `replace` conflicts with dry-run and rollback. `update` accepts mutable model/options/destination/allowed-user/mission/restart-policy fields; live updates require `--apply-restart`. Create/adopt, import, update, and doctor provide dry-run modes. Standalone bash/zsh/fish completions are available with `hermes-omp completion SHELL`.
 
 ## Delivery semantics
 

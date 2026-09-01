@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-omp"
-version = "0.1.0rc1"
+version = "0.2.0rc1"
 description = "Durable OMP supervision for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,3 +20,11 @@ hermes-omp = "hermes_omp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_omp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "plugin", "skills", "docs", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+
+[tool.hermes-plugins]
+plugin-path = "plugins/hermes-omp"
+package-root = "."
+manifest = "plugin/plugin.yaml"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0rc1 - 2026-09-01
+
+- Added consistent `--json` output and stable exit-code categories across user commands.
+- Added redacted queue/event inspection, explicit idempotent outbound dead-letter retry, and health/queue/error observability.
+- Added versioned secret-free export/import with conflict policies, schema checks, dry-run, and rollback.
+- Added transactional mutable updates with explicit live restart, plus create/adopt dry-run service previews.
+- Added bounded log following and filters, safe doctor repairs/dry-run, config validation/templates, and standalone shell completion generation.
+
 ## 0.1.0rc1 - 2026-09-01
 
 - Standalone public Hermes plugin and complete OMP CLI.

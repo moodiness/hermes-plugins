@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _src() -> Path:
@@ -38,15 +41,32 @@ def dispatch(args: argparse.Namespace) -> int:
     if command is None:
         return 2
     argv.append(command)
-    positional = {"name", "message"}
+    positional_by_command = {
+        "adopt": ["name"], "completion": ["shell"], "config": ["config_command", "name"],
+        "create": ["name"], "events": ["name"], "export": ["name", "archive"],
+        "import": ["archive"], "inbound": ["name"], "logs": ["name"], "remove": ["name"],
+        "restart": ["name"], "retry": ["name", "event_id"], "run": ["name"],
+        "send": ["name", "message"], "status": ["name"], "stop": ["name"], "update": ["name"],
+    }
+    positional = positional_by_command.get(str(command), [])
+    for key in positional:
+        value = getattr(args, key, None)
+        if value not in (None, ""):
+            argv.append(str(value))
     for key, value in vars(args).items():
-        if key in {"func", "command"} or value in (None, False, [], ""):
+        if key in {"func", "command", *positional} or value in (None, False, [], ""):
             continue
-        if key in positional:
-            argv.append(str(value)); continue
         option = "--" + key.replace("_", "-")
         if value is True: argv.append(option)
         elif isinstance(value, list):
             for item in value: argv += [option, str(item)]
         else: argv += [option, str(value)]
-    return main(argv)
+    command_name = str(command)
+    logger.info("hermes-omp command requested: %s", command_name)
+    try:
+        result = main(argv)
+    except Exception:
+        logger.exception("hermes-omp command failed: %s", command_name)
+        raise
+    logger.info("hermes-omp command finished: %s rc=%s", command_name, result)
+    return result

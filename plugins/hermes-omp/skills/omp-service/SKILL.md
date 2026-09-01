@@ -1,7 +1,7 @@
 ---
 name: omp-service
 description: Supervise durable OMP sessions through Hermes safely.
-version: 0.1.0rc1
+version: 0.2.0rc1
 author: hermes-omp contributors, Hermes Agent
 license: MIT
 platforms: [macos]
@@ -37,6 +37,9 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 - `terminal(command="hermes omp status NAME --json")`
 - `terminal(command="hermes omp send NAME 'instruction'")`
 - `terminal(command="hermes omp logs NAME --lines 100")`
+- `terminal(command="hermes omp events NAME --status dead,rejected --json")`
+- `terminal(command="hermes omp export NAME archive.json --json")`
+- `terminal(command="hermes omp update NAME --model MODEL --dry-run --json")`
 - `terminal(command="hermes omp stop NAME")`
 
 ## Procedure
@@ -46,6 +49,8 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 3. Start through the installed user service; confirm one supervisor and one OMP PID.
 4. For an OMP question, preserve its correlation ID and route the answer through the configured public inbound adapter.
 5. Stop gracefully and verify the named process is inactive before removal.
+6. Inspect dead letters before running `retry NAME ID --yes`; never retry inbound authorization failures.
+7. Preview create/adopt/import/update/doctor changes with `--dry-run` before service or state changes.
 
 ## Pitfalls
 
