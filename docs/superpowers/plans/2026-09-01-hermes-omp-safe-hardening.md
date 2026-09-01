@@ -132,6 +132,7 @@ git commit -m "fix: commit OMP responses after RPC flush"
 - Produces: `_terminate_child(child: subprocess.Popen, timeout: float = 5.0) -> None` for children created by this supervisor only.
 - Preserves: owner-lock format and `run(name, paths=...) -> int`.
 - Consumes: Task 1 transactional response and `RpcLineBuffer` behavior.
+- Removes: Task 1’s temporary post-exit time/byte truncation; owned-tree shutdown closes inherited descriptors before an unbounded drain-to-EOF of that now-closed tree.
 
 - [ ] **Step 1: Add a failing real-process orphan regression**
 
@@ -148,6 +149,7 @@ assert not (paths.run / "demo.owner").exists()
 ```
 
 The test must own a `finally` cleanup that sends SIGTERM only to the PID written by its temporary fake, so the RED run cannot leak the known orphan. This also proves durable state no longer names the reaped child before ownership is released.
+Add a POSIX-only owned-tree regression in which the direct fake exits after spawning a descendant that inherits stdout and would otherwise keep the selector open. Assert the supervisor terminates only that known process group, consumes every complete frame already emitted, reaches EOF without a time/byte truncation policy, reaps the direct child, and returns. Mark in-process pipe-selector integrations skipped on Windows because `selectors.DefaultSelector` cannot register subprocess pipes there; retain portable unit coverage and document native Windows runtime as unvalidated rather than pretending the test can execute.
 
 - [ ] **Step 2: Run orphan test and verify RED**
 
@@ -161,7 +163,7 @@ Expected: failure because the owner lock disappears while the fake OMP PID remai
 
 - [ ] **Step 3: Implement bounded child-tree cleanup**
 
-On POSIX, terminate the process group whose id equals the child PID created with `start_new_session=True`; on Windows, terminate/kill the exact `Popen` child. Wait up to `timeout`, escalate only that known child/group, then reap. In `run`’s `finally`, perform child cleanup first, then best-effort persist `status="crashed"` with cleared `supervisor_pid=0`/`omp_pid=0` when the normal terminal-state path was not reached, then release the owner lock. Avoid signaling when `child is None` or already exited. Cleanup/state-save failures must not mask the original runtime exception.
+On POSIX, terminate the process group whose id equals the child PID created with `start_new_session=True`, including surviving descendants even when the direct child has already exited; on Windows, terminate/kill the exact `Popen` child. Wait up to `timeout`, escalate only that known child/group, then reap the direct child. Invoke cleanup immediately after direct-child exit and before final stdout drain so inherited writers close and the existing incremental buffer can drain to EOF without arbitrary time or byte caps; invoke it again safely from `finally` for exceptions. In `run`’s `finally`, perform any remaining child cleanup first, then best-effort persist `status="crashed"` with cleared `supervisor_pid=0`/`omp_pid=0` when the normal terminal-state path was not reached, then release the owner lock. Cleanup/state-save failures must not mask the original runtime exception.
 
 - [ ] **Step 4: Make subprocess E2E teardown unconditional**
 
@@ -177,7 +179,7 @@ Run:
 .venv-verify/bin/python -m pytest -q tests/test_runtime.py tests/test_e2e.py
 ```
 
-Expected: all selected tests pass; no child process survives test teardown.
+Expected: all selected tests pass; no child process survives test teardown, inherited descriptors close through owned process-tree cleanup, and no RPC frame is truncated by an invented drain limit.
 
 - [ ] **Step 6: Commit Task 2**
 
