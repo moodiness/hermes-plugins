@@ -249,7 +249,9 @@ class Outbox:
     def pending(self) -> list[OutboxItem]: return [x for x in self.items if x.state == "pending"]
     def due(self, now: Optional[float] = None) -> list[OutboxItem]:
         stamp = time.time() if now is None else now
-        return [x for x in self.items if x.state == "pending" and x.next_attempt <= stamp]
+        pending = [x for x in self.items if x.state == "pending"]
+        if not pending or pending[0].next_attempt > stamp: return []
+        return [pending[0]]
     def ack(self, event_id: str) -> None:
         for x in self.items:
             if x.id == event_id: x.state = "delivered"
@@ -260,6 +262,6 @@ class Outbox:
             if x.id == event_id:
                 x.attempts += 1; x.error = str(redact(error))
                 if x.attempts >= self.max_attempts: x.state = "dead"
-                else: x.next_attempt = stamp + self.base_delay * (2 ** (x.attempts - 1)) + self.jitter()
+                else: x.next_attempt = stamp + min(60.0, self.base_delay * (2 ** (x.attempts - 1))) + self.jitter()
         self._save()
     def dead_letters(self) -> list[OutboxItem]: return [x for x in self.items if x.state == "dead"]

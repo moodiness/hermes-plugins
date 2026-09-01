@@ -90,9 +90,15 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         if child and child.poll() is None: child.terminate()
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
     outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name); bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"))
-    runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY",session.omp_options[0] if session.omp_options else "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
+    runtime_path = paths.run / f"{name}.omp-path"
+    configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
+    runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
     log_path=paths.logs/f"{session.name}.jsonl"; log_path.parent.mkdir(parents=True,exist_ok=True)
     try:
+        outbox=Outbox(paths.outbox/f"{session.name}.json")
+        for item in outbox.due():
+            try: bridge.deliver(item.payload); outbox.ack(item.id)
+            except Exception as exc: outbox.fail(item.id,error=str(exc))
         child=subprocess.Popen(build_omp_command(session,runtime.omp_path),cwd=session.cwd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,start_new_session=True)
         session.status="running"; session.supervisor_pid=os.getpid(); session.omp_pid=child.pid; store.save(session)
         assert child.stdin and child.stdout
@@ -100,17 +106,21 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
         while child.poll() is None:
             for key,_ in selector.select(timeout=.1):
-                line=key.fileobj.readline()
-                if not line: continue
-                try: event=parse_rpc_line(line)
-                except ValueError: event={"type":"unparsed","content":str(redact(line.strip()))}
-                with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
-                action=runtime.on_event(event)
-                if action and action.get("rpc"): child.stdin.write(json.dumps(action["rpc"])+"\n"); child.stdin.flush()
-                elif action: outbox.enqueue(action["event_id"],action)
-                text=_event_text(event)
-                if text:
-                    eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
+                while True:
+                    line=os.read(key.fileobj.fileno(),65536).decode("utf-8",errors="replace")
+                    if not line: break
+                    buffered = line.splitlines(True)
+                    for line in buffered:
+                        try: event=parse_rpc_line(line)
+                        except ValueError: event={"type":"unparsed","content":str(redact(line.strip()))}
+                        with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
+                        action=runtime.on_event(event)
+                        if action and action.get("rpc"): child.stdin.write(json.dumps(action["rpc"])+"\n"); child.stdin.flush()
+                        elif action: outbox.enqueue(action["event_id"],action)
+                        text=_event_text(event)
+                        if text:
+                            eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
+                    break
             for event in inbox.poll():
                 response=runtime.accept_inbound(event)
                 inbox.ack(str(event.get("event_id")))
@@ -118,6 +128,9 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             for item in outbox.due():
                 try: bridge.deliver(item.payload); outbox.ack(item.id)
                 except Exception as exc: outbox.fail(item.id,error=str(exc))
+        for item in outbox.due():
+            try: bridge.deliver(item.payload); outbox.ack(item.id)
+            except Exception as exc: outbox.fail(item.id,error=str(exc))
         code=int(child.returncode or 0); session.status="stopped" if stopping else ("completed" if code==0 else "crashed"); session.last_activity=time.time(); store.save(session); return code
     finally:
         os.close(fd)

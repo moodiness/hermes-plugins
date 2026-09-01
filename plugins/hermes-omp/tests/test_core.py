@@ -100,9 +100,9 @@ def test_outbox_deduplicates_orders_retries_and_dead_letters(tmp_path: Path) -> 
     assert outbox.enqueue("a", {"text": "one"})
     assert not outbox.enqueue("a", {"text": "duplicate"})
     assert outbox.enqueue("b", {"text": "two"})
-    assert [x.id for x in outbox.due(now=0)] == ["a", "b"]
+    assert [x.id for x in outbox.due(now=0)] == ["a"]
     outbox.fail("a", now=10, error="offline")
-    assert [x.id for x in outbox.due(now=11)] == ["b"]
+    assert outbox.due(now=11) == []
     outbox.fail("a", now=12, error="offline")
     assert outbox.dead_letters()[0].id == "a"
     outbox.ack("b")
