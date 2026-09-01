@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-omp"
+version = "0.1.0rc1"
+description = "Durable OMP supervision for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Hermes OMP contributors"}]
+dependencies = []
+
+[project.scripts]
+hermes-omp = "hermes_omp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_omp"]

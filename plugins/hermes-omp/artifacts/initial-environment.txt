@@ -1,0 +1,5 @@
+Hermes Agent v0.20.6 (2026.8.27)
+OMP omp/18.0.10
+Prototype inspected read-only: /Users/admin/.hermes/scripts/omp_service.py
+No repository existed at /Users/admin/Developer/hermes-omp.
+No secret files read. No active process was inspected or modified.
