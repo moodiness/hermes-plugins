@@ -94,11 +94,16 @@ def _finite_owned_group() -> subprocess.Popen[str]:
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], start_new_session=True, text=True)
 
 
-def test_remove_refuses_live_orphan_group_then_recovers(tmp_path: Path, capsys) -> None:
+
+def _orphan_marker(child: subprocess.Popen[str]) -> dict[str, int]:
+    key = "orphaned_pid" if os.name == "nt" else "orphaned_pgid"
+    return {key: child.pid}
+
+def test_remove_refuses_live_orphan_identity_then_recovers(tmp_path: Path, capsys) -> None:
     invoke(tmp_path,capsys,"create","demo","--cwd",str(tmp_path),"--model","m","--mission","x","--omp-path","/bin/true","--no-install")
     paths=Paths.discover(); lock=paths.run/"demo.owner"; session=SessionStore(paths).load("demo")
     child=_finite_owned_group()
-    lock.write_text(json.dumps({"pid":99999999,"session_id":session.id,"token":"orphan","orphaned_pgid":child.pid}))
+    lock.write_text(json.dumps({"pid":99999999,"session_id":session.id,"token":"orphan",**_orphan_marker(child)}))
     try:
         rc, out = invoke(tmp_path,capsys,"remove","demo","--no-service","--json")
         refused = rc == cli.EXIT_CONFLICT and "still running" in json.loads(out)["error"]["message"]
@@ -110,11 +115,11 @@ def test_remove_refuses_live_orphan_group_then_recovers(tmp_path: Path, capsys) 
     assert rc == 0
 
 
-def test_doctor_fix_retains_live_orphan_group_then_removes_stale_marker(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_doctor_fix_retains_live_orphan_identity_then_removes_stale_marker(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.setenv("HERMES_OMP_BINARY","/bin/true"); monkeypatch.setenv("HERMES_OMP_HERMES","/bin/true")
     paths=Paths(tmp_path/"omp"); paths.ensure(); lock=paths.run/"demo.owner"
     child=_finite_owned_group()
-    lock.write_text(json.dumps({"pid":99999999,"session_id":"session","token":"orphan","orphaned_pgid":child.pid}))
+    lock.write_text(json.dumps({"pid":99999999,"session_id":"session","token":"orphan",**_orphan_marker(child)}))
     try:
         rc, _ = invoke(tmp_path,capsys,"doctor","--fix","--json")
         retained = rc == 0 and lock.exists()
@@ -123,3 +128,11 @@ def test_doctor_fix_retains_live_orphan_group_then_removes_stale_marker(tmp_path
     rc, _ = invoke(tmp_path,capsys,"doctor","--fix","--json")
     assert retained
     assert rc == 0 and not lock.exists()
+
+
+def test_orphan_marker_uses_platform_process_identity(monkeypatch) -> None:
+    class Child:
+        pid = 123
+
+    monkeypatch.setattr(cli.os, "name", "nt")
+    assert _orphan_marker(Child()) == {"orphaned_pid": 123}
