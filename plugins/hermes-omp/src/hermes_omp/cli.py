@@ -16,7 +16,7 @@ from typing import Any, Optional
 from . import __version__
 from .bridge import FileInbox
 from .core import Outbox, Paths, SCHEMA_VERSION, Session, SessionStore, atomic_write, redact, slug, validate_session
-from .runtime import inspect_adoption, run
+from .runtime import inspect_adoption, owner_lock_live, run
 from .service import backend_for
 
 EXIT_OK = 0
@@ -98,19 +98,8 @@ def _persist_and_install(session: Session, omp_path: str, no_install: bool, star
         _rollback_create(session, paths); raise
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0: return False
-    try: os.kill(pid, 0)
-    except ProcessLookupError: return False
-    except PermissionError: return True
-    return True
-
-
 def _owner_live(paths: Paths, name: str) -> bool:
-    path = paths.run / f"{slug(name)}.owner"
-    if not path.exists(): return False
-    try: return _pid_alive(int(json.loads(path.read_text()).get("pid", 0)))
-    except (OSError, ValueError, TypeError): return True
+    return owner_lock_live(paths.run / f"{slug(name)}.owner")
 
 
 def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, Any]:
@@ -127,8 +116,7 @@ def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, 
             if fix and not dry_run: os.chmod(path, 0o700)
     if paths.run.exists():
         for lock in paths.run.glob("*.owner"):
-            try: live = _pid_alive(int(json.loads(lock.read_text()).get("pid", 0)))
-            except (OSError, ValueError, TypeError): live = True
+            live = owner_lock_live(lock)
             if not live:
                 repairs.append({"action": "remove_stale_lock", "path": str(lock), "applied": fix and not dry_run})
                 if fix and not dry_run: lock.unlink(missing_ok=True)

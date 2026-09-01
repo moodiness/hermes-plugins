@@ -244,6 +244,28 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
     setattr(child, "_hermes_omp_cleanup_done", True)
 
 
+def owner_lock_live(lock: Path, owner: Optional[dict[str,Any]]=None) -> bool:
+    if owner is None:
+        if not lock.exists():
+            return False
+        try:
+            owner=json.loads(lock.read_text())
+        except (OSError,ValueError,TypeError):
+            return True
+    try:
+        if _pid_alive(int(owner.get("pid",0))):
+            return True
+        orphaned_pid=int(owner.get("orphaned_pid",0))
+        orphaned_pgid=int(owner.get("orphaned_pgid",0))
+    except (AttributeError,TypeError,ValueError):
+        return True
+    if orphaned_pid and _pid_alive(orphaned_pid):
+        return True
+    if orphaned_pgid:
+        return _process_group_alive(orphaned_pgid) if os.name != "nt" else True
+    return False
+
+
 def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
     token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
     while True:
@@ -251,11 +273,10 @@ def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
         except FileExistsError:
             try: current=json.loads(lock.read_text())
             except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
-            if _pid_alive(int(current.get("pid",0))): raise RuntimeError("session already owned")
-            orphaned_pid=int(current.get("orphaned_pid",0))
-            orphaned_pgid=int(current.get("orphaned_pgid",0))
-            orphan_alive=_pid_alive(orphaned_pid) if orphaned_pid else (_process_group_alive(orphaned_pgid) if orphaned_pgid else False)
-            if orphan_alive: raise RuntimeError("owner lock protects an orphaned child")
+            if owner_lock_live(lock,current):
+                if current.get("orphaned_pid") or current.get("orphaned_pgid"):
+                    raise RuntimeError("owner lock protects an orphaned child")
+                raise RuntimeError("session already owned")
             if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
             stale=lock.with_name(f"{lock.name}.stale-{token}")
             try: os.replace(lock,stale)
@@ -271,13 +292,10 @@ def release_owner_lock(lock: Path, fd: int, token: str) -> None:
     if current.get("pid")==os.getpid() and current.get("token")==token: lock.unlink(missing_ok=True)
 
 
-def _retain_orphan_lock(lock: Path, fd: int, session_id: str, token: str, child_pid: int) -> None:
+def _persist_child_owner(lock: Path, session_id: str, token: str, child_pid: int) -> None:
     marker = "orphaned_pid" if os.name == "nt" else "orphaned_pgid"
     payload={"pid":os.getpid(),"session_id":session_id,"token":token,marker:child_pid}
-    try:
-        atomic_write(lock,json.dumps(payload)+"\n")
-    finally:
-        os.close(fd)
+    atomic_write(lock,json.dumps(payload)+"\n")
 
 
 def _event_text(event: dict[str,Any]) -> str:
@@ -322,6 +340,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
         child=subprocess.Popen(build_omp_command(session,runtime.omp_path),cwd=session.cwd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,start_new_session=True)
+        _persist_child_owner(lock,session.id,lock_token,child.pid)
         session.status="running"; session.supervisor_pid=os.getpid(); session.omp_pid=child.pid; store.save(session)
         assert child.stdin and child.stdout
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
@@ -429,7 +448,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         if termination_error is None:
             cleanup(lambda: release_owner_lock(lock,fd,lock_token))
         elif child is not None:
-            cleanup(lambda: _retain_orphan_lock(lock,fd,session.id,lock_token,child.pid))
+            cleanup(lambda: os.close(fd))
             if body_error is not None:
                 _add_exception_note(body_error, f"supervised child cleanup failed: {termination_error}")
             else:

@@ -69,14 +69,14 @@ for raw in sys.stdin.buffer:
                 "import json, os, signal, sys, time\n"
                 "from pathlib import Path\n"
                 "done = Path(os.environ['FAKE_DESC_DONE'])\n"
-                "def finish(*_):\n"
-                "    done.write_text('done')\n"
+                "def terminate(*_):\n"
+                "    done.write_text('term')\n"
                 "    raise SystemExit(0)\n"
-                "signal.signal(signal.SIGTERM, finish)\n"
+                "signal.signal(signal.SIGTERM, terminate)\n"
                 "print(json.dumps({'type':'turn_end','content':'descendant-output'}), flush=True)\n"
                 "Path(os.environ['FAKE_DESC_READY']).write_text('ready')\n"
                 "time.sleep(3)\n"
-                "finish()\n"
+                "done.write_text('timeout')\n"
             ) + """
             subprocess.Popen([sys.executable, "-c", code], stdout=sys.stdout, stderr=sys.stderr)
             while not Path(os.environ["FAKE_DESC_READY"]).exists():
@@ -484,7 +484,7 @@ def test_run_terminates_inherited_stdout_group_then_drains_complete_frame(tmp_pa
     descendant_done = tmp_path / "descendant.done"
     try:
         assert run("demo", paths=paths) == 0
-        descendant_stopped = descendant_done.exists()
+        descendant_stopped = descendant_done.read_text() == "term"
         events = [json.loads(line) for line in (paths.logs / "demo.jsonl").read_text().splitlines()]
         frame_was_drained = {"type":"turn_end","content":"descendant-output"} in events
         reloaded = SessionStore(paths).load("demo")
@@ -538,6 +538,73 @@ def test_run_stop_escalates_term_ignoring_child_group(tmp_path: Path, monkeypatc
     assert code != 7
     assert (state.status, state.supervisor_pid, state.omp_pid) == ("stopped", 0, 0)
     assert elapsed < 6.5
+
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_persists_child_marker_before_processing_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = Paths(tmp_path / "omp")
+    fake = _write_orphan_fake(tmp_path)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
+    SessionStore(paths).save(session)
+    children: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def inspect_then_fail(_inbox):
+        owner = json.loads((paths.run / "demo.owner").read_text())
+        assert owner["orphaned_pgid"] == children[0].pid
+        raise json.JSONDecodeError("malformed", "{", 0)
+
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
+    monkeypatch.setattr(FileInbox, "poll", inspect_then_fail)
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
+    monkeypatch.setenv("FAKE_OMP_PID", str(tmp_path / "fake.pid"))
+    monkeypatch.setenv("FAKE_MALFORMED_INBOX", str(tmp_path / "malformed.json"))
+    try:
+        with pytest.raises(json.JSONDecodeError):
+            run("demo", paths=paths)
+    finally:
+        _stop_fakes(children)
+
+
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_cleans_child_when_proactive_marker_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = Paths(tmp_path / "omp")
+    fake = _write_orphan_fake(tmp_path)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
+    SessionStore(paths).save(session)
+    children: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
+    monkeypatch.setattr("hermes_omp.runtime.atomic_write", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("marker write failed")))
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
+    monkeypatch.setenv("FAKE_OMP_PID", str(tmp_path / "fake.pid"))
+    monkeypatch.setenv("FAKE_MALFORMED_INBOX", str(tmp_path / "malformed.json"))
+    try:
+        with pytest.raises(OSError, match="marker write failed"):
+            run("demo", paths=paths)
+        child_reaped = children[0].returncode is not None
+        state = SessionStore(paths).load("demo")
+        lock_absent = not (paths.run / "demo.owner").exists()
+    finally:
+        _stop_fakes(children)
+    assert child_reaped
+    assert (state.status, state.supervisor_pid, state.omp_pid) == ("crashed", 0, 0)
+    assert lock_absent
+
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
 def test_run_preserves_legacy_exception_when_cleanup_initially_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

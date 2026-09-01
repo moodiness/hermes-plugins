@@ -127,12 +127,16 @@ git commit -m "fix: commit OMP responses after RPC flush"
 - Modify: `plugins/hermes-omp/tests/test_runtime.py`
 - Modify: `plugins/hermes-omp/tests/test_e2e.py`
 - Modify: `plugins/hermes-omp/tests/fixtures/fake_omp.py`
+- Modify: `plugins/hermes-omp/src/hermes_omp/cli.py`
+- Modify: `plugins/hermes-omp/tests/test_cli.py`
 
 **Interfaces:**
 - Produces: `_terminate_child(child: subprocess.Popen, timeout: float = 5.0) -> None` for children created by this supervisor only.
 - Preserves: owner-lock format and `run(name, paths=...) -> int`.
 - Consumes: Task 1 transactional response and `RpcLineBuffer` behavior.
 - Removes: Task 1’s temporary post-exit time/byte truncation; owned-tree shutdown closes inherited descriptors before an unbounded drain-to-EOF of that now-closed tree.
+- Produces: one shared owner-lock liveness check used by acquisition, CLI active-session guards, and doctor; a live recorded child/group prevents stale-lock removal without signaling it.
+- Requires: persist the spawned child identity into the owner lock while the supervisor is live, before later work can fail; cleanup failure therefore needs no fallible identity handoff.
 
 - [ ] **Step 1: Add a failing real-process orphan regression**
 
@@ -176,7 +180,7 @@ Make `fake_omp.py` take its terminal delay from `FAKE_OMP_EXIT_DELAY` with a sho
 Run:
 
 ```bash
-.venv-verify/bin/python -m pytest -q tests/test_runtime.py tests/test_e2e.py
+.venv-verify/bin/python -m pytest -q tests/test_runtime.py tests/test_e2e.py tests/test_cli.py
 ```
 
 Expected: all selected tests pass; no child process survives test teardown, inherited descriptors close through owned process-tree cleanup, and no RPC frame is truncated by an invented drain limit.
@@ -184,7 +188,7 @@ Expected: all selected tests pass; no child process survives test teardown, inhe
 - [ ] **Step 6: Commit Task 2**
 
 ```bash
-git add plugins/hermes-omp/src/hermes_omp/runtime.py plugins/hermes-omp/tests/test_runtime.py plugins/hermes-omp/tests/test_e2e.py plugins/hermes-omp/tests/fixtures/fake_omp.py
+git add plugins/hermes-omp/src/hermes_omp/runtime.py plugins/hermes-omp/src/hermes_omp/cli.py plugins/hermes-omp/tests/test_runtime.py plugins/hermes-omp/tests/test_e2e.py plugins/hermes-omp/tests/test_cli.py plugins/hermes-omp/tests/fixtures/fake_omp.py
 git commit -m "fix: reap supervised OMP children on every exit"
 ```
 
