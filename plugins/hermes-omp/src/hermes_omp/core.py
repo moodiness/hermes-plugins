@@ -196,6 +196,13 @@ class Question:
         lines.append(f"Reply using the public inbound bridge with question_id={self.id}.")
         return "\n".join(lines)
 
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Question":
+        value=dict(data); value["options"]=tuple(Option(**x) for x in value.get("options",[])); return cls(**value)
+
 
 def parse_rpc_line(line: str) -> dict[str, Any]:
     try: value = json.loads(line)

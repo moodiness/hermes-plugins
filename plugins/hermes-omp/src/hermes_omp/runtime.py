@@ -6,11 +6,12 @@ import json
 import os
 import selectors
 import signal
+import secrets
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from .bridge import FileInbox, HermesSendBridge
 from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, atomic_write, classify_safe_answer, parse_rpc_line, redact
@@ -37,8 +38,15 @@ class Runtime:
     def __init__(self, session: Session, paths: Paths, *, omp_path: str, question_ttl: float = 86400, auto_answer_safe: bool = False):
         self.session, self.paths, self.omp_path = session, paths, omp_path
         self.store = SessionStore(paths); self.question_ttl=question_ttl; self.auto_answer_safe=auto_answer_safe
-        self.question: Optional[Question] = None; self.seen: set[str] = set()
+        state_path=paths.run/f"{session.name}.runtime.json"
+        self.state_path=state_path; state=json.loads(state_path.read_text()) if state_path.exists() else {}
+        question=state.get("question")
+        self.question: Optional[Question] = Question.from_dict(question) if question else None
+        self.seen: set[str] = set(str(x) for x in state.get("seen_event_ids",[]))
         self.auth=Authorization(session.platform,session.chat,session.topic,tuple(session.allowed_users))
+
+    def _save_state(self) -> None:
+        atomic_write(self.state_path,json.dumps({"question":self.question.to_dict() if self.question else None,"seen_event_ids":sorted(self.seen)},indent=2)+"\n")
 
     def startup_frames(self) -> list[dict[str, Any]]:
         frames=[{"type":"negotiate_protocol","protocolVersion":2,"id":"negotiate"}]
@@ -52,23 +60,65 @@ class Runtime:
         self._touch(now)
         if event.get("type") != "extension_ui_request" or event.get("method","select") not in {"select","confirm","input","ask"}: return None
         self.question=Question.from_event(event,self.session.name,self.question_ttl,now)
-        atomic_write(self.paths.run/f"{self.session.name}.question.json",json.dumps({"id":self.question.id,"expires_at":self.question.expires_at})+"\n")
+        self._save_state(); atomic_write(self.paths.run/f"{self.session.name}.question.json",json.dumps(self.question.to_dict())+"\n")
         automatic=classify_safe_answer(self.question) if self.auto_answer_safe else None
         if automatic:
-            rpc={"type":"extension_ui_response","id":self.question.id,"value":automatic}; self.question=None
+            rpc={"type":"extension_ui_response","id":self.question.id,"value":automatic}; self.question=None; self._save_state()
             return {"rpc":rpc}
         return {"event_id":f"question-{self.session.id}-{self.question.id}","platform":self.session.platform,"chat":self.session.chat,"topic":self.session.topic,"text":self.question.message()}
 
-    def accept_inbound(self,event:dict[str,Any],now:Optional[float]=None) -> Optional[dict[str,Any]]:
+    def accept_inbound(self,event:dict[str,Any],now:Optional[float]=None) -> "InboundResult":
         stamp=time.time() if now is None else now
-        if not self.question or stamp > self.question.expires_at or not self.auth.authorize(event,expected_question_id=self.question.id,seen_event_ids=self.seen): return None
-        self.seen.add(str(event["event_id"])); value=str(event.get("answer","")).strip()
+        event_id=str(event.get("event_id", ""))
+        if not self.question: return InboundResult(terminal=event_id in self.seen,retryable=event_id not in self.seen)
+        if stamp > self.question.expires_at or not self.auth.authorize(event,expected_question_id=self.question.id,seen_event_ids=self.seen):
+            if event_id: self.seen.add(event_id); self._save_state()
+            return InboundResult(terminal=True)
+        value=str(event.get("answer","")).strip()
         if value.isdigit() and self.question.options:
             index=int(value)-1
-            if not 0 <= index < len(self.question.options): return None
+            if not 0 <= index < len(self.question.options):
+                self.seen.add(event_id); self._save_state(); return InboundResult(terminal=True)
             value=self.question.options[index].label
         response={"type":"extension_ui_response","id":self.question.id,"value":value}
-        self.question=None; self._touch(stamp); return response
+        self.seen.add(event_id); self.question=None; self._save_state(); self._touch(stamp); return InboundResult(response=response)
+
+
+class InboundResult(NamedTuple):
+    response: Optional[dict[str,Any]] = None
+    retryable: bool = False
+    terminal: bool = False
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0: return False
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+
+
+def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
+    token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
+    while True:
+        try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        except FileExistsError:
+            try: current=json.loads(lock.read_text())
+            except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
+            if _pid_alive(int(current.get("pid",0))): raise RuntimeError("session already owned")
+            if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
+            stale=lock.with_name(f"{lock.name}.stale-{token}")
+            try: os.replace(lock,stale)
+            except FileNotFoundError: continue
+            stale.unlink(missing_ok=True); continue
+        os.write(fd,payload.encode()); os.fsync(fd); return fd,token
+
+
+def release_owner_lock(lock: Path, fd: int, token: str) -> None:
+    os.close(fd)
+    try: current=json.loads(lock.read_text())
+    except (OSError,ValueError): return
+    if current.get("pid")==os.getpid() and current.get("token")==token: lock.unlink(missing_ok=True)
 
 
 def _event_text(event: dict[str,Any]) -> str:
@@ -82,8 +132,7 @@ def _event_text(event: dict[str,Any]) -> str:
 def run(name: str, *, paths: Optional[Paths]=None) -> int:
     paths=paths or Paths.discover(); store=SessionStore(paths); session=store.load(name)
     lock=paths.run/f"{session.name}.owner"
-    try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-    except FileExistsError: raise RuntimeError(f"session already owned: {session.name}")
+    fd,lock_token=acquire_owner_lock(lock,session.id)
     child=None; stopping=False
     def stop(*_):
         nonlocal stopping; stopping=True
@@ -93,6 +142,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
     runtime_path = paths.run / f"{name}.omp-path"
     configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
     runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
+
     log_path=paths.logs/f"{session.name}.jsonl"; log_path.parent.mkdir(parents=True,exist_ok=True)
     try:
         outbox=Outbox(paths.outbox/f"{session.name}.json")
@@ -121,10 +171,18 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                         if text:
                             eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
                     break
+            prompts=Outbox(paths.run/f"{session.name}.prompts.json")
+            for item in prompts.due():
+                try:
+                    child.stdin.write(json.dumps({"type":"prompt","id":item.id,"message":str(item.payload["message"])})+"\n"); child.stdin.flush(); prompts.ack(item.id)
+                except (BrokenPipeError,OSError): prompts.fail(item.id)
             for event in inbox.poll():
-                response=runtime.accept_inbound(event)
-                inbox.ack(str(event.get("event_id")))
-                if response: child.stdin.write(json.dumps(response)+"\n"); child.stdin.flush()
+                result=runtime.accept_inbound(event)
+                if result.response:
+                    try: child.stdin.write(json.dumps(result.response)+"\n"); child.stdin.flush()
+                    except (BrokenPipeError,OSError): continue
+                    inbox.ack(str(event.get("event_id")))
+                elif result.terminal: inbox.reject(str(event.get("event_id")))
             for item in outbox.due():
                 try: bridge.deliver(item.payload); outbox.ack(item.id)
                 except Exception as exc: outbox.fail(item.id,error=str(exc))
@@ -133,9 +191,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             except Exception as exc: outbox.fail(item.id,error=str(exc))
         code=int(child.returncode or 0); session.status="stopped" if stopping else ("completed" if code==0 else "crashed"); session.last_activity=time.time(); store.save(session); return code
     finally:
-        os.close(fd)
-        try: lock.unlink()
-        except FileNotFoundError: pass
+        release_owner_lock(lock,fd,lock_token)
 
 
 def main(argv: Optional[list[str]]=None) -> int:

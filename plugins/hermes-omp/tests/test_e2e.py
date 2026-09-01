@@ -39,6 +39,10 @@ def test_all_16_isolated_acceptance_scenarios(tmp_path: Path, monkeypatch) -> No
         raise AssertionError(f"runtime exited={proc.returncode} stdout={stdout!r} stderr={stderr!r}")
     omp_pid=json.loads((tmp_path/"omp-state.json").read_text())["pid"]
 
+    # Durable CLI prompt queue reaches OMP RPC and is acknowledged only after write.
+    assert main(["send","demo","follow-up prompt"]) == 0
+    wait_for(lambda:any(x.payload.get("message")=="follow-up prompt" and x.state=="delivered" for x in __import__("hermes_omp.core",fromlist=["Outbox"]).Outbox(paths.run/"demo.prompts.json").items))
+
     # 4-5 authorized answer accepted; wrong user/topic rejected
     inbox=paths.inbox/"demo"; inbox.mkdir(parents=True,exist_ok=True)
     wrong={"event_id":"wrong","question_id":"q-001","platform":"telegram","chat":"42","topic":"WRONG","user":"10","answer":"2"}

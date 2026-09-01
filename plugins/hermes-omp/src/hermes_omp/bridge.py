@@ -43,6 +43,8 @@ class FileInbox:
         self.path.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.done = path / "processed"
         self.done.mkdir(exist_ok=True, mode=0o700)
+        self.rejected = path / "rejected"
+        self.rejected.mkdir(exist_ok=True, mode=0o700)
 
     def submit(self, event: dict[str, Any]) -> Path:
         event_id = slug(str(event.get("event_id") or ""))
@@ -59,3 +61,7 @@ class FileInbox:
     def ack(self, event_id: str) -> None:
         source = self.path / f"{slug(event_id)}.json"
         if source.exists(): os.replace(source, self.done / source.name)
+
+    def reject(self, event_id: str) -> None:
+        source = self.path / f"{slug(event_id)}.json"
+        if source.exists(): os.replace(source, self.rejected / source.name)

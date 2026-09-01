@@ -12,8 +12,8 @@ for raw in sys.stdin:
     frame=json.loads(raw)
     if frame.get("type")=="negotiate_protocol": print(json.dumps({"type":"protocol_negotiated","sessionId":resume}),flush=True)
     elif frame.get("type")=="prompt":
-        print(json.dumps({"type":"message_end","message":{"role":"assistant","content":"mission received"}}),flush=True)
-        print(json.dumps({"type":"extension_ui_request","id":"q-001","method":"select","title":"Choose safe path","options":[{"label":"Proceed","description":"Reversible local operation","recommended":True,"reversible":True},{"label":"Stop","description":"Stop now"}]}),flush=True)
+        print(json.dumps({"type":"message_end","message":{"role":"assistant","content":str(frame.get("message"))+" received"}}),flush=True)
+        if frame.get("id")=="initial": print(json.dumps({"type":"extension_ui_request","id":"q-001","method":"select","title":"Choose safe path","options":[{"label":"Proceed","description":"Reversible local operation","recommended":True,"reversible":True},{"label":"Stop","description":"Stop now"}]}),flush=True)
     elif frame.get("type")=="extension_ui_response":
         print(json.dumps({"type":"message_end","message":{"role":"assistant","content":"answer="+str(frame["value"])}}),flush=True)
         print(json.dumps({"type":"turn_end"}),flush=True)

@@ -46,10 +46,13 @@ def test_systemd_user_unit_generation() -> None:
     assert "Restart=always" in text and "WorkingDirectory=/work" in text and "ExecStart=python -m hermes_omp.runtime demo" in text
 
 
-def test_windows_task_xml_generation_quotes_arguments() -> None:
-    text = WindowsTaskBackend(Path("C:/x")).definition("demo", ["python.exe", "-m", "hermes_omp.runtime", "demo"], "C:/Work Area", "on-failure")
+@pytest.mark.parametrize(("policy","restart_count"), [("never",None),("on-failure","3"),("always","999")])
+def test_windows_task_xml_generation_honors_restart_policy(policy: str, restart_count: str | None) -> None:
+    text = WindowsTaskBackend(Path("C:/x")).definition("demo", ["python.exe", "-m", "hermes_omp.runtime", "demo"], "C:/Work Area", policy)
     assert "<Command>python.exe</Command>" in text and "<WorkingDirectory>C:/Work Area</WorkingDirectory>" in text
     assert "-m hermes_omp.runtime demo" in text
+    if restart_count is None: assert "<RestartOnFailure>" not in text
+    else: assert f"<Count>{restart_count}</Count>" in text
 
 
 def test_backend_selection() -> None:

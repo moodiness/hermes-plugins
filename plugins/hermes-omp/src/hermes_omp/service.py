@@ -66,7 +66,8 @@ class SystemdBackend(ServiceBackend):
 class WindowsTaskBackend(ServiceBackend):
     def definition(self,name,command,cwd,restart_policy):
         args=" ".join(shlex.quote(x) for x in command[1:])
-        return f'''<?xml version="1.0" encoding="UTF-16"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''
+        restart="" if restart_policy=="never" else f"<RestartOnFailure><Interval>PT1M</Interval><Count>{'3' if restart_policy=='on-failure' else '999'}</Count></RestartOnFailure>"
+        return f'''<?xml version="1.0" encoding="UTF-16"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>{restart}</Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''
     def _path(self,name): return self.root/"services"/f"hermes-omp-{slug(name)}.xml"
     def install(self,name,command,cwd,restart_policy,activate=True):
         path=self._path(name); atomic_write(path,self.definition(name,command,cwd,restart_policy),0o600)

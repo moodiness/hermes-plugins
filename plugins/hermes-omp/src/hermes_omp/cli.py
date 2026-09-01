@@ -55,6 +55,31 @@ def _install(session: Session, no_install: bool, start: bool, paths: Paths) -> N
     if start: backend.start(session.name)
 
 
+def _rollback_create(session: Session, paths: Paths) -> None:
+    try: backend_for(root=paths.root).remove(session.name)
+    except Exception: pass
+    for target in (paths.sessions/f"{session.name}.json",paths.run/f"{session.name}.omp-path"):
+        target.unlink(missing_ok=True)
+
+
+def _persist_and_install(session: Session, omp_path: str, no_install: bool, start: bool, paths: Paths) -> None:
+    store=SessionStore(paths); store.save(session)
+    atomic_path=paths.run/f"{session.name}.omp-path"
+    from .core import atomic_write
+    atomic_write(atomic_path,omp_path+"\n")
+    try: _install(session,no_install,start,paths)
+    except Exception:
+        _rollback_create(session,paths); raise
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0: return False
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+
+
 def doctor(paths: Paths) -> dict[str, Any]:
     omp=os.environ.get("HERMES_OMP_BINARY") or shutil.which("omp")
     hermes=os.environ.get("HERMES_OMP_HERMES") or shutil.which("hermes")
@@ -71,11 +96,11 @@ def main(argv: Optional[list[str]]=None) -> int:
         if not cwd.is_dir(): raise ValueError(f"cwd does not exist: {cwd}")
         store.assert_unique_omp_id(args.resume)
         session=Session.new(name=args.name,cwd=str(cwd),model=args.model,mission=args.mission,project=args.project,platform=args.platform,chat=args.chat,topic=args.topic,allowed_users=args.allowed_user,restart_policy=args.restart_policy,omp_session_id=args.resume,plugin_version=__version__,hermes_version=_version([os.environ.get("HERMES_OMP_HERMES","hermes"),"--version"]),omp_version=_version([args.omp_path,"--version"]),omp_options=args.omp_option)
-        store.save(session); atomic_path=paths.run/f"{session.name}.omp-path"; atomic_path.write_text(args.omp_path); os.chmod(atomic_path,0o600); _install(session,args.no_install,args.start,paths); print(json.dumps(dataclasses.asdict(session))); return 0
+        _persist_and_install(session,args.omp_path,args.no_install,args.start,paths); print(json.dumps(dataclasses.asdict(session))); return 0
     if args.command=="adopt":
         data=json.loads(Path(args.inspection).read_text()); info=inspect_adoption(list(data["argv"]),str(data["cwd"])); store.assert_unique_omp_id(info["omp_session_id"])
         session=Session.new(name=args.name,cwd=info["cwd"],model=info["model"],mission=args.mission,platform=args.platform,chat=args.chat,topic=args.topic,allowed_users=args.allowed_user,restart_policy=args.restart_policy,omp_session_id=info["omp_session_id"],plugin_version=__version__,omp_version="adopted")
-        store.save(session); (paths.run/f"{session.name}.omp-path").write_text(args.omp_path); _install(session,args.no_install,args.start,paths); print(json.dumps(dataclasses.asdict(session))); return 0
+        _persist_and_install(session,args.omp_path,args.no_install,args.start,paths); print(json.dumps(dataclasses.asdict(session))); return 0
     if args.command=="list": print(json.dumps([dataclasses.asdict(x) for x in store.list()],indent=2)); return 0
     if args.command=="status": print(json.dumps(dataclasses.asdict(store.load(args.name)),indent=2)); return 0
     if args.command=="send":
@@ -90,12 +115,27 @@ def main(argv: Optional[list[str]]=None) -> int:
         print(json.dumps({"requested":args.command,"name":slug(args.name)})); return 0
     if args.command=="remove":
         name=slug(args.name)
-        if not args.no_service: backend_for(root=paths.root).remove(name)
-        for target in [paths.sessions/f"{name}.json",paths.run/f"{name}.omp-path",paths.run/f"{name}.owner"]:
+        lock=paths.run/f"{name}.owner"
+        if lock.exists():
+            try: owner=json.loads(lock.read_text())
+            except (OSError,ValueError): raise RuntimeError("cannot verify owner lock; refusing removal")
+            if _pid_alive(int(owner.get("pid",0))): raise RuntimeError(f"session still running: {name}")
+        if not args.no_service:
+            backend=backend_for(root=paths.root); backend.stop(name)
+            deadline=time.time()+5
+            while lock.exists() and time.time()<deadline:
+                try: owner=json.loads(lock.read_text())
+                except (OSError,ValueError): break
+                if not _pid_alive(int(owner.get("pid",0))): break
+                time.sleep(.05)
+            if lock.exists() and _pid_alive(int(json.loads(lock.read_text()).get("pid",0))): raise RuntimeError(f"session still running: {name}")
+            backend.remove(name)
+        for target in [paths.sessions/f"{name}.json",paths.run/f"{name}.omp-path",paths.run/f"{name}.runtime.json",paths.run/f"{name}.question.json"]:
             if target.exists(): target.unlink()
+        if lock.exists(): lock.unlink()
         print(json.dumps({"removed":name})); return 0
     if args.command=="inbound":
-        store.load(args.name); event={key:str(getattr(args,key)) for key in ("event_id","question_id","platform","chat","topic","user","answer")}; FileInbox(paths.inbox/slug(args.name)).submit(event); print(json.dumps({"accepted":True,"event_id":args.event_id})); return 0
+        store.load(args.name); event={key:str(getattr(args,key)) for key in ("event_id","question_id","platform","chat","topic","user","answer")}; FileInbox(paths.inbox/slug(args.name)).submit(event); print(json.dumps({"queued":True,"event_id":args.event_id,"validation":"runtime"})); return 0
     if args.command=="run": return run(args.name,paths=paths)
     return 2
 
