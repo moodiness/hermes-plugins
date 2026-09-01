@@ -17,5 +17,5 @@ for raw in sys.stdin:
     elif frame.get("type")=="extension_ui_response":
         print(json.dumps({"type":"message_end","message":{"role":"assistant","content":"answer="+str(frame["value"])}}),flush=True)
         print(json.dumps({"type":"turn_end"}),flush=True)
-        time.sleep(2)
+        time.sleep(float(os.environ.get("FAKE_OMP_EXIT_DELAY", "0.05")))
         sys.exit(0)

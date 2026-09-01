@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import signal
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ import pytest
 from hermes_omp.core import Paths, Session, SessionStore
 from hermes_omp.bridge import HermesSendBridge
 from hermes_omp.runtime import RpcLineBuffer, Runtime, acquire_owner_lock, build_omp_command, inspect_adoption, run
+
+WINDOWS_PIPE_SELECTOR_REASON = "subprocess-pipe selector integration is not validated on native Windows"
 
 def _write_transactional_fake(tmp_path: Path) -> Path:
     fake = tmp_path / "transactional_fake_omp.py"
@@ -65,16 +68,36 @@ for raw in sys.stdin.buffer:
                 "import json, os, sys, time\n"
                 "from pathlib import Path\n"
                 "print(json.dumps({'type':'turn_end','content':'descendant-output'}), flush=True)\n"
-                "time.sleep(1.5)\n"
-                "Path(os.environ['FAKE_DESC_DONE']).write_text('done')\n"
+                "Path(os.environ['FAKE_DESC_PID']).write_text(str(os.getpid()))\n"
+                "time.sleep(30)\n"
             ) + """
             subprocess.Popen([sys.executable, "-c", code], stdout=sys.stdout, stderr=sys.stderr)
+            while not Path(os.environ["FAKE_DESC_PID"]).exists():
+                time.sleep(0.01)
             finish()
         print(json.dumps(question), flush=True)
     elif frame.get("type") == "extension_ui_response":
         Path(os.environ["FAKE_OMP_OBSERVED"]).write_bytes(raw)
         finish()
 finish()
+""",
+        encoding="utf-8",
+    )
+    return fake
+
+
+def _write_orphan_fake(tmp_path: Path) -> Path:
+    fake = tmp_path / "orphan_fake_omp.py"
+    fake.write_text(
+        """import os
+import sys
+from pathlib import Path
+
+Path(os.environ["FAKE_OMP_PID"]).write_text(str(os.getpid()))
+Path(os.environ["FAKE_MALFORMED_INBOX"]).write_text("{")
+print("{\\"type\\":\\"ready\\"}", flush=True)
+for _ in sys.stdin:
+    pass
 """,
         encoding="utf-8",
     )
@@ -116,12 +139,59 @@ def _transactional_runtime(
     monkeypatch.setenv("FAKE_OMP_MODE", mode)
     monkeypatch.setenv("FAKE_OMP_DONE", str(tmp_path / "fake.done"))
     monkeypatch.setenv("FAKE_OMP_OBSERVED", str(observed))
-    monkeypatch.setenv("FAKE_DESC_DONE", str(tmp_path / "descendant.done"))
+    monkeypatch.setenv("FAKE_DESC_PID", str(tmp_path / "descendant.pid"))
     inbox = paths.inbox / "demo"
     inbox.mkdir(parents=True, exist_ok=True)
     event = {"event_id":"e","question_id":"q","platform":"telegram","chat":"42","topic":"7","user":"9","answer":"1"}
     (inbox / "e.json").write_text(json.dumps(event), encoding="utf-8")
     return paths, children, observed
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_until(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def _owned_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _stop_owned_group(child: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        _stop_fakes([child])
+        return
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if not _wait_until(lambda: not _owned_group_alive(child.pid), timeout=0.5):
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _wait_until(lambda: not _owned_group_alive(child.pid), timeout=0.5)
+    try:
+        child.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _stop_fakes(children: list[subprocess.Popen[str]]) -> None:
@@ -192,6 +262,7 @@ def test_commit_response_rejects_a_different_pending_question(tmp_path: Path) ->
     assert "e" not in runtime.seen
 
 
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
 def test_run_transactional_response_failed_flush_preserves_question_and_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "failure")
     try:
@@ -205,6 +276,7 @@ def test_run_transactional_response_failed_flush_preserves_question_and_inbox(tm
         _stop_fakes(children)
 
 
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
 def test_run_transactional_response_flushes_complete_frame_before_commit_and_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, children, observed = _transactional_runtime(tmp_path, monkeypatch, "success")
     original_commit = Runtime.commit_response
@@ -291,6 +363,7 @@ def test_rpc_line_buffer_reconstructs_fragmented_multibyte_utf8() -> None:
     assert buffer.finish() == ""
 
 
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
 def test_run_logs_valid_unterminated_rpc_as_redacted_residue_without_side_effects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "residue")
     try:
@@ -303,22 +376,67 @@ def test_run_logs_valid_unterminated_rpc_as_redacted_residue_without_side_effect
         _stop_fakes(children)
 
 
-def test_run_bounds_post_exit_drain_when_descendant_inherits_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_terminates_inherited_stdout_group_then_drains_complete_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, children, _ = _transactional_runtime(tmp_path, monkeypatch, "inherited_stdout")
-    descendant_done = tmp_path / "descendant.done"
-    started = time.monotonic()
+    descendant_pid_path = tmp_path / "descendant.pid"
+    dead_before_cleanup = False
     try:
         assert run("demo", paths=paths) == 0
-        assert time.monotonic() - started < 1.0
+        descendant_pid = int(descendant_pid_path.read_text())
+        dead_before_cleanup = _wait_until(lambda: not _pid_alive(descendant_pid))
         events = [json.loads(line) for line in (paths.logs / "demo.jsonl").read_text().splitlines()]
-        assert {"type":"turn_end","content":"descendant-output"} in events
-        assert children[0].stdout is not None and children[0].stdout.closed
+        frame_was_drained = {"type":"turn_end","content":"descendant-output"} in events
+        reloaded = SessionStore(paths).load("demo")
+        final_state = (reloaded.status, reloaded.supervisor_pid, reloaded.omp_pid)
+        stdout_was_closed = children[0].stdout is not None and children[0].stdout.closed
     finally:
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and not descendant_done.exists():
-            time.sleep(0.01)
-        assert descendant_done.exists()
+        for child in children:
+            _stop_owned_group(child)
+    assert dead_before_cleanup
+    assert frame_was_drained
+    assert stdout_was_closed
+    assert final_state == ("completed", 0, 0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_malformed_inbox_reaps_owned_orphan_before_clearing_state_and_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = Paths(tmp_path / "omp")
+    fake = _write_orphan_fake(tmp_path)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
+    SessionStore(paths).save(session)
+    pid_path = tmp_path / "fake.pid"
+    inbox = paths.inbox / "demo"
+    inbox.mkdir(parents=True, exist_ok=True)
+    children: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("FAKE_MALFORMED_INBOX", str(inbox / "malformed.json"))
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
+    monkeypatch.setenv("FAKE_OMP_PID", str(pid_path))
+    child_dead = False
+    try:
+        with pytest.raises(json.JSONDecodeError):
+            run("demo", paths=paths)
+        assert _wait_until(pid_path.exists)
+        child_pid = int(pid_path.read_text())
+        child_dead = _wait_until(lambda: not _pid_alive(child_pid))
+        reloaded = SessionStore(paths).load("demo")
+        final_state = (reloaded.status, reloaded.supervisor_pid, reloaded.omp_pid)
+        lock_absent = not (paths.run / "demo.owner").exists()
+    finally:
         _stop_fakes(children)
+    assert child_dead
+    assert final_state == ("crashed", 0, 0)
+    assert lock_absent
 
 
 

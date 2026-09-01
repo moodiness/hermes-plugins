@@ -127,6 +127,57 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None:
+    if getattr(child, "_hermes_omp_cleanup_done", False):
+        return
+
+    timeout = max(0.0, timeout)
+    deadline = time.monotonic() + timeout
+    if os.name == "nt":
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        if child.poll() is None:
+            child.wait(timeout=max(0.1, timeout))
+    else:
+        pgid = child.pid
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        while time.monotonic() < deadline:
+            child.poll()
+            if not _process_group_alive(pgid):
+                break
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        if _process_group_alive(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if child.poll() is None:
+            try:
+                child.wait(timeout=max(0.1, min(timeout, 0.5)))
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=0.5)
+
+    setattr(child, "_hermes_omp_cleanup_done", True)
+
+
 def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
     token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
     while True:
@@ -162,10 +213,18 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
     paths=paths or Paths.discover(); store=SessionStore(paths); session=store.load(name)
     lock=paths.run/f"{session.name}.owner"
     fd,lock_token=acquire_owner_lock(lock,session.id)
-    child=None; stopping=False
+    child: Optional[subprocess.Popen[str]]=None
+    selector: Optional[selectors.BaseSelector]=None
+    line_buffer: Optional[RpcLineBuffer]=None
+    terminal_state_saved=False
+    stopping=False
+
     def stop(*_):
-        nonlocal stopping; stopping=True
-        if child and child.poll() is None: child.terminate()
+        nonlocal stopping
+        stopping=True
+        if child and child.poll() is None:
+            child.terminate()
+
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
     outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name); bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"))
     runtime_path = paths.run / f"{name}.omp-path"
@@ -184,14 +243,11 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
         line_buffer=RpcLineBuffer()
-        exit_drain_deadline: Optional[float]=None
-        post_exit_bytes=0
+        child_cleaned=False
         while child.poll() is None or selector.get_map():
-            if child.poll() is not None:
-                if exit_drain_deadline is None:
-                    exit_drain_deadline=time.monotonic()+.25
-                elif time.monotonic() >= exit_drain_deadline:
-                    break
+            if child.poll() is not None and not child_cleaned:
+                _terminate_child(child)
+                child_cleaned=True
             for key,_ in selector.select(timeout=.05):
                 while True:
                     data=os.read(key.fileobj.fileno(),65536)
@@ -213,10 +269,6 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                         text=_event_text(event)
                         if text:
                             eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
-                    if exit_drain_deadline is not None:
-                        post_exit_bytes += len(data)
-                        if post_exit_bytes >= 1024*1024:
-                            selector.unregister(key.fileobj)
                     break
             prompts=Outbox(paths.run/f"{session.name}.prompts.json")
             for item in prompts.due():
@@ -234,6 +286,9 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             for item in outbox.due():
                 try: bridge.deliver(item.payload); outbox.ack(item.id)
                 except Exception as exc: outbox.fail(item.id,error=str(exc))
+        if not child_cleaned:
+            _terminate_child(child)
+            child_cleaned=True
         selector.close()
         child.stdout.close()
         try:
@@ -249,9 +304,38 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         for item in outbox.due():
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
-        code=int(child.returncode or 0); session.status="stopped" if stopping else ("completed" if code==0 else "crashed"); session.last_activity=time.time(); store.save(session); return code
+        code=int(child.returncode or 0)
+        session.status="stopped" if stopping else ("completed" if code==0 else "crashed")
+        session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
+        store.save(session); terminal_state_saved=True
+        return code
     finally:
-        release_owner_lock(lock,fd,lock_token)
+        original_error=sys.exc_info()[1]
+        cleanup_error: Optional[BaseException]=None
+
+        def cleanup(action) -> None:
+            nonlocal cleanup_error
+            try:
+                action()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error=exc
+
+        if child is not None:
+            cleanup(lambda: _terminate_child(child))
+        if selector is not None:
+            cleanup(selector.close)
+        if child is not None:
+            if child.stdout is not None:
+                cleanup(child.stdout.close)
+            if child.stdin is not None:
+                cleanup(child.stdin.close)
+        if child is not None and not terminal_state_saved:
+            session.status="crashed"; session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
+            cleanup(lambda: store.save(session))
+        cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        if original_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def main(argv: Optional[list[str]]=None) -> int:
