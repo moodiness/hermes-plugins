@@ -74,6 +74,37 @@ def test_same_name_create_conflicts_without_overwriting_or_deleting(
     assert omp_path.read_bytes() == original_omp_path
 
 
+def test_preinstall_write_failure_never_removes_service(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    removed: list[str] = []
+
+    class Backend:
+        def remove(self, name):
+            removed.append(name)
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+    original_atomic_write = cli.atomic_write
+
+    def fail_omp_path(path, data, mode=0o600):
+        if path.name == "demo.omp-path":
+            raise OSError("injected omp-path failure")
+        return original_atomic_write(path, data, mode)
+
+    monkeypatch.setattr(cli, "atomic_write", fail_omp_path)
+
+    with pytest.raises(OSError, match="injected omp-path failure"):
+        invoke(
+            tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path),
+            "--model", "m", "--mission", "x", "--omp-path", "/bin/true",
+        )
+
+    paths = Paths.discover()
+    assert removed == []
+    assert not (paths.sessions / "demo.json").exists()
+    assert not (paths.run / "demo.omp-path").exists()
+
+
 def test_adopt_uses_explicit_inspection_file_not_process_mutation(tmp_path: Path, capsys) -> None:
     inspection=tmp_path/"inspection.json"; inspection.write_text(json.dumps({"argv":["omp","--resume","sid","--model","m"],"cwd":str(tmp_path)}))
     rc,out=invoke(tmp_path,capsys,"adopt","adopted","--inspection",str(inspection),"--mission","continue","--omp-path","/bin/true","--no-install","--json")

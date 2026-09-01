@@ -210,3 +210,37 @@ def test_path_lock_uses_platform_lock_and_releases_once(
 
     modes = [call[1] for call in calls]
     assert modes == ["exclusive", "unlock"]
+
+
+def test_path_lock_setup_failure_does_not_skip_next_platform_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+    manager = SimpleNamespace(
+        LOCK_EX="exclusive",
+        LOCK_UN="unlock",
+        flock=lambda fd, mode: calls.append(mode),
+    )
+    monkeypatch.setitem(sys.modules, "fcntl", manager)
+    monkeypatch.setattr(core.os, "name", "posix")
+    path = tmp_path / "queue.json"
+    lock_path = path.with_name("queue.json.lock")
+    original_open = Path.open
+    failed = False
+
+    def fail_first_open(self, *args, **kwargs):
+        nonlocal failed
+        if self == lock_path and not failed:
+            failed = True
+            raise OSError("injected lock open failure")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_first_open)
+
+    with pytest.raises(OSError, match="injected lock open failure"):
+        with core._path_lock(path):
+            pass
+    with core._path_lock(path):
+        pass
+
+    assert calls == ["exclusive", "unlock"]

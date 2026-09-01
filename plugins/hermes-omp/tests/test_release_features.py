@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -153,8 +154,169 @@ def test_replace_import_restores_all_tracked_files_on_failure(
             tmp_path, capsys, "import", str(archive), "--conflict", "replace",
             "--json",
         )
-
     assert {target: target.read_bytes() for target in targets} == originals
+
+
+
+def test_concurrent_rename_imports_reserve_distinct_names(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    archive = tmp_path / "rename.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+    original_persist = cli._persist_and_install
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    def coordinated_persist(*args, **kwargs):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            number = call_count
+        if number == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_persist_and_install", coordinated_persist)
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def run_import() -> None:
+        try:
+            results.append(cli.main([
+                "import", str(archive), "--conflict", "rename", "--no-install",
+            ]))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=run_import)
+    second = threading.Thread(target=run_import)
+    first.start()
+    assert first_entered.wait(2)
+    second.start()
+    overlapped = second_entered.wait(0.25)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert not overlapped
+    assert errors == [] and sorted(results) == [0, 0]
+    paths = Paths.discover()
+    assert (paths.sessions / "demo-2.json").exists()
+    assert (paths.sessions / "demo-3.json").exists()
+
+
+def test_failed_replace_cannot_rollback_over_later_success(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    base_archive = tmp_path / "base.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(base_archive), "--json")[0] == 0
+
+    def replacement_archive(path: Path, model: str) -> None:
+        value = json.loads(base_archive.read_text())
+        value["session"]["model"] = model
+        value["omp_path"] = f"/{model}/omp"
+        value["runtime"] = {"model": model}
+        path.write_text(json.dumps(value))
+
+    failing_archive = tmp_path / "failing.json"
+    winner_archive = tmp_path / "winner.json"
+    replacement_archive(failing_archive, "failing")
+    replacement_archive(winner_archive, "winner")
+    failing_entered = threading.Event()
+    release_failing = threading.Event()
+    winner_entered = threading.Event()
+
+    class Backend:
+        def definition(self, *args, **kwargs):
+            return {"fake": True}
+
+        def install(self, *args, **kwargs):
+            pass
+
+        def remove(self, name):
+            pass
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    def coordinated_install(session, no_install, start, paths):
+        if session.model == "failing":
+            failing_entered.set()
+            assert release_failing.wait(2)
+            raise RuntimeError("injected install failure")
+        winner_entered.set()
+
+    monkeypatch.setattr(cli, "_install", coordinated_install)
+    results: list[object] = []
+
+    def run_import(path: Path) -> None:
+        try:
+            results.append(cli.main(["import", str(path), "--conflict", "replace"]))
+        except BaseException as exc:
+            results.append(exc)
+
+    failing = threading.Thread(target=run_import, args=(failing_archive,))
+    winner = threading.Thread(target=run_import, args=(winner_archive,))
+    failing.start()
+    assert failing_entered.wait(2)
+    winner.start()
+    overlapped = winner_entered.wait(0.25)
+    release_failing.set()
+    failing.join(2)
+    winner.join(2)
+
+    assert not failing.is_alive() and not winner.is_alive()
+    assert not overlapped
+    assert any(isinstance(result, RuntimeError) for result in results)
+    assert 0 in results
+    paths = Paths.discover()
+    assert SessionStore(paths).load("demo").model == "winner"
+    assert (paths.run / "demo.omp-path").read_text() == "/winner/omp\n"
+    assert json.loads((paths.run / "demo.runtime.json").read_text()) == {"model": "winner"}
+
+
+def test_replace_service_failure_restores_prior_definition(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    archive = tmp_path / "replace.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+    value = json.loads(archive.read_text())
+    value["session"]["restart_policy"] = "always"
+    archive.write_text(json.dumps(value))
+    installs: list[str] = []
+
+    class Backend:
+        def definition(self, *args, **kwargs):
+            return {"fake": True}
+
+        def install(self, name, command, cwd, restart_policy, activate):
+            installs.append(restart_policy)
+            if restart_policy == "always":
+                raise RuntimeError("injected replacement install failure")
+
+        def remove(self, name):
+            raise AssertionError("replacement rollback must not remove the service")
+
+    backend = Backend()
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: backend)
+
+    with pytest.raises(RuntimeError, match="replacement install failure"):
+        invoke(
+            tmp_path, capsys, "import", str(archive), "--conflict", "replace",
+            "--json",
+        )
+
+    assert installs == ["always", "on-failure"]
+    assert SessionStore(Paths.discover()).load("demo").restart_policy == "on-failure"
 
 
 def test_update_requires_explicit_restart_for_live_session_and_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:

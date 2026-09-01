@@ -92,36 +92,72 @@ def _restore_file(path: Path, backup: Optional[bytes]) -> None:
         atomic_write(path, backup.decode("utf-8"))
 
 
-def _rollback_create(session: Session, paths: Paths, backups: dict[Path, Optional[bytes]]) -> None:
-    try:
-        backend_for(root=paths.root).remove(session.name)
-    except Exception:
-        pass
-    for target, backup in backups.items():
-        _restore_file(target, backup)
-
-
-def _persist_and_install(session: Session, omp_path: str, no_install: bool, start: bool, paths: Paths, *, replace: bool = False) -> None:
+def _persist_and_install(
+    session: Session,
+    omp_path: str,
+    no_install: bool,
+    start: bool,
+    paths: Paths,
+    *,
+    replace: bool = False,
+    runtime: Optional[dict[str, Any]] = None,
+) -> None:
     store = SessionStore(paths)
     session_path = paths.sessions / f"{session.name}.json"
     omp_path_file = paths.run / f"{session.name}.omp-path"
-    backups = {
-        session_path: session_path.read_bytes() if session_path.exists() else None,
-        omp_path_file: omp_path_file.read_bytes() if omp_path_file.exists() else None,
-    }
-    try:
-        if replace:
-            store.replace(session)
-        else:
-            store.create(session)
-    except FileExistsError as exc:
-        raise CliError(f"session already exists: {session.name}", "conflict", EXIT_CONFLICT) from exc
-    try:
-        atomic_write(omp_path_file, omp_path + "\n")
-        _install(session, no_install, start, paths)
-    except Exception:
-        _rollback_create(session, paths, backups)
-        raise
+    runtime_path = paths.run / f"{session.name}.runtime.json"
+    targets = [session_path, omp_path_file]
+    if runtime is not None:
+        targets.append(runtime_path)
+
+    with store.transaction():
+        backups = {
+            target: target.read_bytes() if target.exists() else None
+            for target in targets
+        }
+        previous = store.load(session.name) if replace else None
+        written: list[Path] = []
+        service_install_attempted = False
+        service_install_succeeded = False
+        try:
+            try:
+                if replace:
+                    store.replace(session)
+                else:
+                    store.create(session)
+            except FileExistsError as exc:
+                raise CliError(f"session already exists: {session.name}", "conflict", EXIT_CONFLICT) from exc
+            except ValueError:
+                raise
+            except Exception:
+                _restore_file(session_path, backups[session_path])
+                raise
+            written.append(session_path)
+
+            written.append(omp_path_file)
+            atomic_write(omp_path_file, omp_path + "\n")
+            if runtime is not None:
+                written.append(runtime_path)
+                atomic_write(runtime_path, json.dumps(runtime, indent=2) + "\n")
+            if not no_install:
+                service_install_attempted = True
+                _install(session, no_install, start, paths)
+                service_install_succeeded = True
+        except Exception:
+            for target in reversed(written):
+                _restore_file(target, backups[target])
+            if service_install_attempted:
+                backend = backend_for(root=paths.root)
+                try:
+                    if previous is not None:
+                        backend.install(previous.name, _runtime_command(previous.name), previous.cwd, previous.restart_policy, activate=True)
+                        if start and service_install_succeeded:
+                            backend.start(previous.name)
+                    else:
+                        backend.remove(session.name)
+                except Exception:
+                    pass
+            raise
 
 
 def _owner_live(paths: Paths, name: str) -> bool:
@@ -286,32 +322,53 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
     if args.command == "export":
         session = _load(store, args.name); archive = _archive(session, paths); target = Path(args.archive).expanduser(); atomic_write(target, json.dumps(archive, indent=2, sort_keys=True) + "\n"); _emit(args, {"exported": session.name, "archive": str(target), "archive_version": ARCHIVE_VERSION}, f"Exported {session.name} to {target}"); return EXIT_OK
     if args.command == "import":
-        archive = _parse_archive(Path(args.archive)); source = Session(**archive["session"]); name = source.name; existing = paths.sessions / f"{name}.json"
-        if existing.exists():
-            if args.conflict == "fail": raise CliError(f"session already exists: {name}", "conflict", EXIT_CONFLICT)
-            if args.conflict == "rename":
-                counter = 2
-                while (paths.sessions / f"{name}-{counter}.json").exists(): counter += 1
-                name = f"{name}-{counter}"
-            elif _owner_live(paths, name): raise CliError("cannot replace an active session", "conflict", EXIT_CONFLICT)
-        replacing = existing.exists() and args.conflict == "replace"
-        session_data = dataclasses.asdict(source); session_data.update({"name": name, "id": Session.new(name=name, cwd=source.cwd, model=source.model, mission=source.mission).id, "supervisor_pid": 0, "omp_pid": 0, "status": "imported", "plugin_version": __version__}); session = Session(**session_data)
-        plan = {"dry_run": args.dry_run, "name": name, "conflict": args.conflict, "service_definition": _definition(session, paths)}
-        if args.dry_run: _emit(args, plan, f"Would import as {name}"); return EXIT_OK
-        backups: dict[Path, bytes] = {}
-        targets = [paths.sessions / f"{name}.json", paths.run / f"{name}.omp-path", paths.run / f"{name}.runtime.json"]
-        for target in targets:
-            if target.exists(): backups[target] = target.read_bytes()
-        try:
-            _persist_and_install(session, str(archive.get("omp_path") or "omp"), args.no_install, args.start, paths, replace=replacing)
-            runtime = archive.get("runtime") or {}
-            if runtime: atomic_write(targets[2], json.dumps(runtime, indent=2) + "\n")
-        except Exception:
-            for target in targets:
-                if target in backups: atomic_write(target, backups[target].decode())
-                else: target.unlink(missing_ok=True)
-            raise
-        _emit(args, {**plan, "imported": name}, f"Imported {name}"); return EXIT_OK
+        archive = _parse_archive(Path(args.archive))
+        source = Session(**archive["session"])
+        with store.transaction():
+            name = source.name
+            existing = paths.sessions / f"{name}.json"
+            if existing.exists():
+                if args.conflict == "fail":
+                    raise CliError(f"session already exists: {name}", "conflict", EXIT_CONFLICT)
+                if args.conflict == "rename":
+                    counter = 2
+                    while (paths.sessions / f"{name}-{counter}.json").exists():
+                        counter += 1
+                    name = f"{name}-{counter}"
+                elif _owner_live(paths, name):
+                    raise CliError("cannot replace an active session", "conflict", EXIT_CONFLICT)
+            replacing = existing.exists() and args.conflict == "replace"
+            session_data = dataclasses.asdict(source)
+            session_data.update({
+                "name": name,
+                "id": Session.new(name=name, cwd=source.cwd, model=source.model, mission=source.mission).id,
+                "supervisor_pid": 0,
+                "omp_pid": 0,
+                "status": "imported",
+                "plugin_version": __version__,
+            })
+            session = Session(**session_data)
+            plan = {
+                "dry_run": args.dry_run,
+                "name": name,
+                "conflict": args.conflict,
+                "service_definition": _definition(session, paths),
+            }
+            if args.dry_run:
+                _emit(args, plan, f"Would import as {name}")
+                return EXIT_OK
+            runtime = archive.get("runtime") or None
+            _persist_and_install(
+                session,
+                str(archive.get("omp_path") or "omp"),
+                args.no_install,
+                args.start,
+                paths,
+                replace=replacing,
+                runtime=runtime,
+            )
+        _emit(args, {**plan, "imported": name}, f"Imported {name}")
+        return EXIT_OK
     if args.command == "update":
         session = _load(store, args.name); mutable = {"model": args.model, "mission": args.mission, "platform": args.platform, "chat": args.chat, "topic": args.topic, "allowed_users": args.allowed_user, "restart_policy": args.restart_policy, "omp_options": args.omp_option}; changes = {key: {"from": getattr(session, key), "to": value} for key, value in mutable.items() if value is not None and value != getattr(session, key)}
         if not changes: raise CliError("no mutable changes requested", "validation", EXIT_VALIDATION)

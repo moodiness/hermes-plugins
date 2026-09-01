@@ -43,48 +43,50 @@ def _path_lock(path: Path):
             _PATH_LOCK_DEPTH.depths = depths
         depth = depths.get(key, 0)
         depths[key] = depth + 1
-        if depth:
+        try:
+            if depth:
+                yield
+                return
+
+            lock_path = path.with_name(path.name + ".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a+b")
+            locked = False
             try:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
                 yield
             finally:
-                depths[key] -= 1
-            return
+                try:
+                    if locked:
+                        handle.seek(0)
+                        if os.name == "nt":
+                            import msvcrt
 
-        lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = lock_path.open("a+b")
-        locked = False
-        try:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-                os.fsync(handle.fileno())
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            locked = True
-            yield
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
         finally:
-            try:
-                if locked:
-                    handle.seek(0)
-                    if os.name == "nt":
-                        import msvcrt
-
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        import fcntl
-
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
+            if depth:
+                depths[key] = depth
+            else:
                 depths.pop(key, None)
 
 
@@ -197,6 +199,11 @@ class SessionStore:
     @property
     def _lock_path(self) -> Path:
         return self.paths.sessions / ".store"
+
+    @contextlib.contextmanager
+    def transaction(self):
+        with _path_lock(self._lock_path):
+            yield
 
     def create(self, session: Session) -> None:
         path = self.paths.sessions / f"{slug(session.name)}.json"
