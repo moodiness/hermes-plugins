@@ -86,7 +86,13 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
 
         store=SessionStore(paths); session=store.load("demo"); session.omp_session_id="fake-session-001"; session.status="crashed"; store.save(session)
         restarted=spawn([sys.executable,"-m","hermes_omp.runtime","demo"],env=env)
-        wait_for(lambda:json.loads((tmp_path/"omp-state.json").read_text())["pid"]!=omp_pid)
+        def restarted_with_resume() -> bool:
+            try:
+                state=json.loads((tmp_path/"omp-state.json").read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                return False
+            return state["pid"]!=omp_pid and state["session_id"]=="fake-session-001"
+        wait_for(restarted_with_resume)
         stop_process(restarted)
 
         command=[sys.executable,"-m","hermes_omp.runtime","demo"]

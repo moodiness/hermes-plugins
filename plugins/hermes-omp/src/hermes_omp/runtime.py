@@ -137,12 +137,37 @@ def _process_group_alive(pgid: int) -> bool:
     return True
 
 
+def _child_exited_unreaped(child: subprocess.Popen[Any]) -> bool:
+    if os.name == "nt":
+        return child.poll() is not None
+    if child.returncode is not None:
+        return True
+    try:
+        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return True
+    return result is not None
+
+
+def _wait_for_unreaped_exit(child: subprocess.Popen[Any], deadline: float) -> bool:
+    while True:
+        try:
+            result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError as exc:
+            raise RuntimeError("supervised child was reaped before process-group cleanup") from exc
+        if result is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
 def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None:
     if getattr(child, "_hermes_omp_cleanup_done", False):
         return
 
     timeout = max(0.0, timeout)
-    deadline = time.monotonic() + timeout
     if os.name == "nt":
         if child.poll() is None:
             child.terminate()
@@ -152,28 +177,61 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
                 child.kill()
         if child.poll() is None:
             child.wait(timeout=max(0.1, timeout))
-    else:
-        pgid = child.pid
+        setattr(child, "_hermes_omp_cleanup_done", True)
+        return
+
+    pgid = child.pid
+    if child.returncode is not None:
+        if _process_group_alive(pgid):
+            raise RuntimeError("supervised child was reaped before its process group disappeared")
+        setattr(child, "_hermes_omp_cleanup_done", True)
+        return
+
+    try:
+        exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError as exc:
+        if _process_group_alive(pgid):
+            raise RuntimeError("supervised child was reaped before process-group cleanup") from exc
+        setattr(child, "_hermes_omp_cleanup_done", True)
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError as exc:
+        if not exited:
+            raise RuntimeError("supervised child process group disappeared before termination") from exc
+    except PermissionError:
+        if not exited:
+            raise
+
+    term_deadline = time.monotonic() + timeout
+    if not exited:
+        exited = _wait_for_unreaped_exit(child, term_deadline)
+
+    if _process_group_alive(pgid):
         try:
-            os.killpg(pgid, signal.SIGTERM)
+            os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        while time.monotonic() < deadline:
-            child.poll()
-            if not _process_group_alive(pgid):
-                break
-            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-        if _process_group_alive(pgid):
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if child.poll() is None:
-            try:
-                child.wait(timeout=max(0.1, min(timeout, 0.5)))
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=0.5)
+        except PermissionError:
+            if not exited:
+                raise
+
+    kill_deadline = time.monotonic() + max(0.1, timeout)
+    if not exited and not _wait_for_unreaped_exit(child, kill_deadline):
+        raise RuntimeError("supervised child did not exit after SIGKILL")
+
+    remaining = max(0.0, kill_deadline - time.monotonic())
+    try:
+        child.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("supervised child could not be reaped after SIGKILL") from exc
+
+    while _process_group_alive(pgid):
+        remaining = kill_deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("supervised child process group survived SIGKILL")
+        time.sleep(min(0.01, remaining))
 
     setattr(child, "_hermes_omp_cleanup_done", True)
 
@@ -222,8 +280,6 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
     def stop(*_):
         nonlocal stopping
         stopping=True
-        if child and child.poll() is None:
-            child.terminate()
 
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
     outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name); bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"))
@@ -244,8 +300,8 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
         line_buffer=RpcLineBuffer()
         child_cleaned=False
-        while child.poll() is None or selector.get_map():
-            if child.poll() is not None and not child_cleaned:
+        while not child_cleaned or selector.get_map():
+            if not child_cleaned and (stopping or _child_exited_unreaped(child)):
                 _terminate_child(child)
                 child_cleaned=True
             for key,_ in selector.select(timeout=.05):
@@ -311,7 +367,14 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         return code
     finally:
         original_error=sys.exc_info()[1]
+        termination_error: Optional[BaseException]=None
         cleanup_error: Optional[BaseException]=None
+
+        if child is not None:
+            try:
+                _terminate_child(child)
+            except BaseException as exc:
+                termination_error=exc
 
         def cleanup(action) -> None:
             nonlocal cleanup_error
@@ -321,8 +384,6 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                 if cleanup_error is None:
                     cleanup_error=exc
 
-        if child is not None:
-            cleanup(lambda: _terminate_child(child))
         if selector is not None:
             cleanup(selector.close)
         if child is not None:
@@ -331,9 +392,20 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             if child.stdin is not None:
                 cleanup(child.stdin.close)
         if child is not None and not terminal_state_saved:
-            session.status="crashed"; session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
+            session.status="crashed"; session.last_activity=time.time()
+            if termination_error is None:
+                session.supervisor_pid=0; session.omp_pid=0
             cleanup(lambda: store.save(session))
-        cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        if termination_error is None:
+            cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        else:
+            note=f"supervised child cleanup failed: {termination_error}"
+            if original_error is not None:
+                original_error.add_note(note)
+            if cleanup_error is not None and original_error is not None:
+                original_error.add_note(f"additional cleanup failed: {cleanup_error}")
+            if original_error is None:
+                raise termination_error
         if original_error is None and cleanup_error is not None:
             raise cleanup_error
 

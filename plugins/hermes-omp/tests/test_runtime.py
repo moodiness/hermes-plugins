@@ -5,6 +5,7 @@ import os
 import subprocess
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 
 from hermes_omp.core import Paths, Session, SessionStore
 from hermes_omp.bridge import HermesSendBridge
-from hermes_omp.runtime import RpcLineBuffer, Runtime, acquire_owner_lock, build_omp_command, inspect_adoption, run
+from hermes_omp.runtime import RpcLineBuffer, Runtime, _terminate_child, acquire_owner_lock, build_omp_command, inspect_adoption, run
 
 WINDOWS_PIPE_SELECTOR_REASON = "subprocess-pipe selector integration is not validated on native Windows"
 
@@ -104,6 +105,33 @@ for _ in sys.stdin:
     return fake
 
 
+def _write_term_ignoring_fake(tmp_path: Path) -> Path:
+    fake = tmp_path / "term_ignoring_fake_omp.py"
+    fake.write_text(
+        """import os
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(os.environ["FAKE_OMP_PID"]).write_text(str(os.getpid()))
+print('{"type":"ready"}', flush=True)
+
+def watchdog():
+    time.sleep(7)
+    os._exit(7)
+
+threading.Thread(target=watchdog, daemon=True).start()
+for _ in sys.stdin:
+    pass
+""",
+        encoding="utf-8",
+    )
+    return fake
+
+
 def _transactional_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -166,46 +194,68 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
     return bool(predicate())
 
 
-def _owned_group_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def _stop_owned_group(child: subprocess.Popen[str]) -> None:
-    if os.name == "nt":
-        _stop_fakes([child])
-        return
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    if not _wait_until(lambda: not _owned_group_alive(child.pid), timeout=0.5):
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        _wait_until(lambda: not _owned_group_alive(child.pid), timeout=0.5)
-    try:
-        child.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
-        pass
-
-
 def _stop_fakes(children: list[subprocess.Popen[str]]) -> None:
     for child in children:
-        try:
-            child.wait(timeout=0.5)
-            continue
-        except subprocess.TimeoutExpired:
-            child.terminate()
-        try:
-            child.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait(timeout=0.5)
+        if child.returncode is None:
+            _terminate_child(child, timeout=0.5)
+
+
+def _stop_test_pid(pid: int) -> None:
+    if not _pid_alive(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    if _wait_until(lambda: not _pid_alive(pid), timeout=0.5):
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
+    _wait_until(lambda: not _pid_alive(pid), timeout=0.5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group ordering contract")
+def test_terminate_child_signals_group_before_reaping(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    killed = False
+
+    class Child:
+        pid = 12345
+        returncode = None
+
+        def wait(self, timeout):
+            events.append("wait")
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+    child = Child()
+
+    def waitid(*_args):
+        events.append("waitid")
+        return object() if killed else None
+
+    def killpg(_pgid, sig):
+        nonlocal killed
+        if sig == 0:
+            events.append("probe")
+            if child.returncode is not None:
+                raise ProcessLookupError
+        elif sig == signal.SIGTERM:
+            events.append("term")
+        elif sig == signal.SIGKILL:
+            events.append("kill")
+            killed = True
+
+    monkeypatch.setattr("hermes_omp.runtime.os.waitid", waitid)
+    monkeypatch.setattr("hermes_omp.runtime.os.killpg", killpg)
+    _terminate_child(child, timeout=0)
+    completed_events = list(events)
+    _terminate_child(child, timeout=0)
+
+    assert events == completed_events
+    assert events.index("term") < events.index("kill") < events.index("wait")
 
 
 
@@ -391,12 +441,94 @@ def test_run_terminates_inherited_stdout_group_then_drains_complete_frame(tmp_pa
         final_state = (reloaded.status, reloaded.supervisor_pid, reloaded.omp_pid)
         stdout_was_closed = children[0].stdout is not None and children[0].stdout.closed
     finally:
-        for child in children:
-            _stop_owned_group(child)
+        _stop_fakes(children)
+        if descendant_pid_path.exists():
+            _stop_test_pid(int(descendant_pid_path.read_text()))
     assert dead_before_cleanup
     assert frame_was_drained
     assert stdout_was_closed
     assert final_state == ("completed", 0, 0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_stop_escalates_term_ignoring_child_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = Paths(tmp_path / "omp")
+    fake = _write_term_ignoring_fake(tmp_path)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
+    SessionStore(paths).save(session)
+    pid_path = tmp_path / "fake.pid"
+    children: list[subprocess.Popen[str]] = []
+    handlers: dict[int, object] = {}
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda signum, handler: handlers.__setitem__(signum, handler))
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
+    monkeypatch.setenv("FAKE_OMP_PID", str(pid_path))
+
+    def request_stop() -> None:
+        assert _wait_until(pid_path.exists)
+        handlers[signal.SIGTERM]()
+
+    stopper = threading.Thread(target=request_stop)
+    stopper.start()
+    started = time.monotonic()
+    try:
+        code = run("demo", paths=paths)
+        elapsed = time.monotonic() - started
+        state = SessionStore(paths).load("demo")
+    finally:
+        stopper.join(timeout=3)
+        _stop_fakes(children)
+    assert code != 7
+    assert (state.status, state.supervisor_pid, state.omp_pid) == ("stopped", 0, 0)
+    assert elapsed < 6.5
+
+@pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
+def test_run_cleanup_failure_keeps_ownership_and_original_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = Paths(tmp_path / "omp")
+    fake = _write_orphan_fake(tmp_path)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
+    SessionStore(paths).save(session)
+    pid_path = tmp_path / "fake.pid"
+    inbox = paths.inbox / "demo"; inbox.mkdir(parents=True, exist_ok=True)
+    children: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    production_cleanup = _terminate_child
+    monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
+    monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
+    monkeypatch.setattr("hermes_omp.runtime._terminate_child", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("cleanup failed")))
+    monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
+    monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
+    monkeypatch.setenv("FAKE_OMP_PID", str(pid_path))
+    monkeypatch.setenv("FAKE_MALFORMED_INBOX", str(inbox / "malformed.json"))
+    try:
+        with pytest.raises(json.JSONDecodeError) as caught:
+            run("demo", paths=paths)
+        state = SessionStore(paths).load("demo")
+        lock_present = (paths.run / "demo.owner").exists()
+        recorded_pids = (state.supervisor_pid, state.omp_pid)
+        notes = getattr(caught.value, "__notes__", [])
+    finally:
+        if children and children[0].returncode is None:
+            production_cleanup(children[0], timeout=0.5)
+        _stop_fakes(children)
+    assert state.status == "crashed"
+    assert recorded_pids == (os.getpid(), children[0].pid)
+    assert lock_present
+    assert any("cleanup failed" in note for note in notes)
 
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
