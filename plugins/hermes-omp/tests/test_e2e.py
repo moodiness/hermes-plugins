@@ -30,10 +30,10 @@ def stop_process(proc: subprocess.Popen[str]) -> None:
         return
     proc.terminate()
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=7)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait(timeout=5)
+        proc.wait(timeout=7)
 
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)

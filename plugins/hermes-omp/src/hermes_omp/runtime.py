@@ -252,6 +252,10 @@ def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
             try: current=json.loads(lock.read_text())
             except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
             if _pid_alive(int(current.get("pid",0))): raise RuntimeError("session already owned")
+            orphaned_pid=int(current.get("orphaned_pid",0))
+            orphaned_pgid=int(current.get("orphaned_pgid",0))
+            orphan_alive=_pid_alive(orphaned_pid) if orphaned_pid else (_process_group_alive(orphaned_pgid) if orphaned_pgid else False)
+            if orphan_alive: raise RuntimeError("owner lock protects an orphaned child")
             if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
             stale=lock.with_name(f"{lock.name}.stale-{token}")
             try: os.replace(lock,stale)
@@ -265,6 +269,15 @@ def release_owner_lock(lock: Path, fd: int, token: str) -> None:
     try: current=json.loads(lock.read_text())
     except (OSError,ValueError): return
     if current.get("pid")==os.getpid() and current.get("token")==token: lock.unlink(missing_ok=True)
+
+
+def _retain_orphan_lock(lock: Path, fd: int, session_id: str, token: str, child_pid: int) -> None:
+    marker = "orphaned_pid" if os.name == "nt" else "orphaned_pgid"
+    payload={"pid":os.getpid(),"session_id":session_id,"token":token,marker:child_pid}
+    try:
+        atomic_write(lock,json.dumps(payload)+"\n")
+    finally:
+        os.close(fd)
 
 
 def _event_text(event: dict[str,Any]) -> str:
@@ -388,16 +401,10 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         cleanup_error: Optional[BaseException]=None
 
         if child is not None:
-            while True:
-                try:
-                    _terminate_child(child)
-                    break
-                except BaseException as exc:
-                    if termination_error is None:
-                        termination_error=exc
-                        if body_error is not None:
-                            _add_exception_note(body_error, f"supervised child cleanup failed; retrying: {exc}")
-                    time.sleep(0.05)
+            try:
+                _terminate_child(child)
+            except BaseException as exc:
+                termination_error=exc
 
         def cleanup(action) -> None:
             nonlocal cleanup_error
@@ -415,16 +422,23 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             if child.stdin is not None:
                 cleanup(child.stdin.close)
         if child is not None and not terminal_state_saved:
-            session.status="crashed"; session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
+            session.status="crashed"; session.last_activity=time.time()
+            if termination_error is None:
+                session.supervisor_pid=0; session.omp_pid=0
             cleanup(lambda: store.save(session))
-        cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        if termination_error is None:
+            cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        elif child is not None:
+            cleanup(lambda: _retain_orphan_lock(lock,fd,session.id,lock_token,child.pid))
+            if body_error is not None:
+                _add_exception_note(body_error, f"supervised child cleanup failed: {termination_error}")
+            else:
+                raise termination_error
         if cleanup_error is not None:
             if body_error is not None:
                 _add_exception_note(body_error, f"additional cleanup failed: {cleanup_error}")
             elif termination_error is None:
                 raise cleanup_error
-        if body_error is None and termination_error is not None:
-            raise termination_error
 
 
 def main(argv: Optional[list[str]]=None) -> int:

@@ -13,7 +13,7 @@ import pytest
 
 from hermes_omp.core import Paths, Session, SessionStore
 from hermes_omp.bridge import FileInbox, HermesSendBridge
-from hermes_omp.runtime import RpcLineBuffer, Runtime, _terminate_child, acquire_owner_lock, build_omp_command, inspect_adoption, run
+from hermes_omp.runtime import RpcLineBuffer, Runtime, _terminate_child, acquire_owner_lock, build_omp_command, inspect_adoption, release_owner_lock, run
 
 WINDOWS_PIPE_SELECTOR_REASON = "subprocess-pipe selector integration is not validated on native Windows"
 
@@ -148,7 +148,7 @@ from pathlib import Path
 Path(os.environ["FAKE_CHILD_STARTED"]).write_text("started")
 Path(os.environ["FAKE_MALFORMED_INBOX"]).write_text("{")
 print('{"type":"ready"}', flush=True)
-time.sleep(4)
+time.sleep(10)
 Path(os.environ["FAKE_CHILD_DONE"]).write_text("done")
 """,
         encoding="utf-8",
@@ -580,14 +580,14 @@ def test_run_preserves_legacy_exception_when_cleanup_initially_fails(tmp_path: P
     try:
         with pytest.raises(LegacyError) as caught:
             run("demo", paths=paths)
-        final_state = SessionStore(paths).load("demo")
-        lock_absent = not (paths.run / "demo.owner").exists()
+        retained_state = SessionStore(paths).load("demo")
+        lock_payload = json.loads((paths.run / "demo.owner").read_text())
     finally:
         _stop_fakes(children)
     assert caught.value is original
-    assert attempts >= 2
-    assert (final_state.supervisor_pid, final_state.omp_pid) == (0, 0)
-    assert lock_absent
+    assert attempts == 1
+    assert (retained_state.supervisor_pid, retained_state.omp_pid) == (os.getpid(), children[0].pid)
+    assert lock_payload["orphaned_pgid"] == children[0].pid
 
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
@@ -617,72 +617,80 @@ def test_run_does_not_mistake_callers_active_exception_for_body_error(tmp_path: 
 
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
-def test_failed_cleanup_keeps_live_supervisor_lock_until_retry_reaps_child(tmp_path: Path) -> None:
+def test_failed_cleanup_leaves_recoverable_orphan_marker_after_supervisor_exit(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
     fake = _write_finite_cleanup_fake(tmp_path)
     session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission", omp_options=[str(fake)])
     SessionStore(paths).save(session)
     inbox = paths.inbox / "demo"; inbox.mkdir(parents=True, exist_ok=True)
-    retrying = tmp_path / "retrying"
-    allow_retry = tmp_path / "allow-retry"
+    unexpected_retry = tmp_path / "unexpected-retry"
     body_error = tmp_path / "body-error"
-    harness = """import json, os, sys, time
+    harness = """import json, os, sys
 from pathlib import Path
 from hermes_omp import runtime
 from hermes_omp.core import Paths
 
 real_cleanup = runtime._terminate_child
 attempts = 0
-def flaky_cleanup(child, timeout=5.0):
+def fail_once(child, timeout=5.0):
     global attempts
     attempts += 1
     if attempts == 1:
-        raise RuntimeError('controlled initial cleanup failure')
-    Path(os.environ['RETRYING']).write_text('retrying')
-    while not Path(os.environ['ALLOW_RETRY']).exists():
-        time.sleep(0.01)
+        raise RuntimeError('controlled cleanup failure')
+    Path(os.environ['UNEXPECTED_RETRY']).write_text('retried')
     return real_cleanup(child, timeout=0.5)
 
-runtime._terminate_child = flaky_cleanup
+runtime._terminate_child = fail_once
 try:
     runtime.run('demo', paths=Paths(Path(os.environ['OMP_ROOT'])))
 except json.JSONDecodeError:
     Path(os.environ['BODY_ERROR']).write_text('JSONDecodeError')
     raise SystemExit(23)
 """
+    child_done = tmp_path / "child-done"
     env = {
         **os.environ,
         "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
         "HERMES_OMP_BINARY": sys.executable,
         "OMP_ROOT": str(paths.root),
         "FAKE_CHILD_STARTED": str(tmp_path / "child-started"),
-        "FAKE_CHILD_DONE": str(tmp_path / "child-done"),
+        "FAKE_CHILD_DONE": str(child_done),
         "FAKE_MALFORMED_INBOX": str(inbox / "malformed.json"),
-        "RETRYING": str(retrying),
-        "ALLOW_RETRY": str(allow_retry),
+        "UNEXPECTED_RETRY": str(unexpected_retry),
         "BODY_ERROR": str(body_error),
     }
-    supervisor = subprocess.Popen([sys.executable, "-c", harness], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    supervisor = subprocess.Popen([sys.executable, "-c", harness], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
     try:
-        assert _wait_until(retrying.exists, timeout=3)
+        supervisor.wait(timeout=6)
+        stdout = stderr = ""
         lock_payload = json.loads((paths.run / "demo.owner").read_text())
         retained_state = SessionStore(paths).load("demo")
-        with pytest.raises(RuntimeError, match="already owned"):
+        with pytest.raises(RuntimeError, match="orphaned child"):
             acquire_owner_lock(paths.run / "demo.owner", session.id)
-        assert supervisor.poll() is None
-        allow_retry.write_text("continue")
-        stdout, stderr = supervisor.communicate(timeout=8)
-        final_state = SessionStore(paths).load("demo")
-        lock_absent = not (paths.run / "demo.owner").exists()
+        lock_refused_while_orphan_lived = (paths.run / "demo.owner").exists()
     finally:
-        allow_retry.write_text("continue")
         _stop_process(supervisor)
-    assert lock_payload["pid"] == supervisor.pid
-    assert retained_state.supervisor_pid == supervisor.pid and retained_state.omp_pid > 0
+        if (paths.run / "demo.owner").exists():
+            _wait_until(child_done.exists, timeout=11)
+
+    recovered = False
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not recovered:
+        try:
+            fd, token = acquire_owner_lock(paths.run / "demo.owner", session.id)
+        except RuntimeError:
+            time.sleep(0.01)
+        else:
+            recovered = True
+            release_owner_lock(paths.run / "demo.owner", fd, token)
     assert supervisor.returncode == 23, (stdout, stderr)
     assert body_error.read_text() == "JSONDecodeError"
-    assert (final_state.supervisor_pid, final_state.omp_pid) == (0, 0)
-    assert lock_absent
+    assert not unexpected_retry.exists()
+    assert lock_payload["pid"] == supervisor.pid
+    assert lock_payload["orphaned_pgid"] == retained_state.omp_pid
+    assert retained_state.supervisor_pid == supervisor.pid and retained_state.omp_pid > 0
+    assert lock_refused_while_orphan_lived
+    assert recovered
 
 
 @pytest.mark.skipif(os.name == "nt", reason=WINDOWS_PIPE_SELECTOR_REASON)
