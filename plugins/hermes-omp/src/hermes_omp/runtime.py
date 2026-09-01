@@ -9,7 +9,6 @@ import selectors
 import signal
 import secrets
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -163,6 +162,15 @@ def _wait_for_unreaped_exit(child: subprocess.Popen[Any], deadline: float) -> bo
         time.sleep(min(0.01, remaining))
 
 
+def _wait_for_group_exit(pgid: int, deadline: float) -> bool:
+    while _process_group_alive(pgid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+    return True
+
+
 def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None:
     if getattr(child, "_hermes_omp_cleanup_done", False):
         return
@@ -205,8 +213,11 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
             raise
 
     term_deadline = time.monotonic() + timeout
-    if not exited:
-        exited = _wait_for_unreaped_exit(child, term_deadline)
+    while time.monotonic() < term_deadline and (not exited or _process_group_alive(pgid)):
+        if not exited:
+            exited = _wait_for_unreaped_exit(child, min(term_deadline, time.monotonic() + 0.01))
+        else:
+            _wait_for_group_exit(pgid, term_deadline)
 
     if _process_group_alive(pgid):
         try:
@@ -227,11 +238,8 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("supervised child could not be reaped after SIGKILL") from exc
 
-    while _process_group_alive(pgid):
-        remaining = kill_deadline - time.monotonic()
-        if remaining <= 0:
-            raise RuntimeError("supervised child process group survived SIGKILL")
-        time.sleep(min(0.01, remaining))
+    if not _wait_for_group_exit(pgid, kill_deadline):
+        raise RuntimeError("supervised child process group survived SIGKILL")
 
     setattr(child, "_hermes_omp_cleanup_done", True)
 
@@ -267,6 +275,12 @@ def _event_text(event: dict[str,Any]) -> str:
     return ""
 
 
+def _add_exception_note(error: BaseException, note: str) -> None:
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
 def run(name: str, *, paths: Optional[Paths]=None) -> int:
     paths=paths or Paths.discover(); store=SessionStore(paths); session=store.load(name)
     lock=paths.run/f"{session.name}.owner"
@@ -275,6 +289,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
     selector: Optional[selectors.BaseSelector]=None
     line_buffer: Optional[RpcLineBuffer]=None
     terminal_state_saved=False
+    body_error: Optional[BaseException]=None
     stopping=False
 
     def stop(*_):
@@ -365,16 +380,24 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
         store.save(session); terminal_state_saved=True
         return code
+    except BaseException as exc:
+        body_error=exc
+        raise
     finally:
-        original_error=sys.exc_info()[1]
         termination_error: Optional[BaseException]=None
         cleanup_error: Optional[BaseException]=None
 
         if child is not None:
-            try:
-                _terminate_child(child)
-            except BaseException as exc:
-                termination_error=exc
+            while True:
+                try:
+                    _terminate_child(child)
+                    break
+                except BaseException as exc:
+                    if termination_error is None:
+                        termination_error=exc
+                        if body_error is not None:
+                            _add_exception_note(body_error, f"supervised child cleanup failed; retrying: {exc}")
+                    time.sleep(0.05)
 
         def cleanup(action) -> None:
             nonlocal cleanup_error
@@ -392,22 +415,16 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             if child.stdin is not None:
                 cleanup(child.stdin.close)
         if child is not None and not terminal_state_saved:
-            session.status="crashed"; session.last_activity=time.time()
-            if termination_error is None:
-                session.supervisor_pid=0; session.omp_pid=0
+            session.status="crashed"; session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
             cleanup(lambda: store.save(session))
-        if termination_error is None:
-            cleanup(lambda: release_owner_lock(lock,fd,lock_token))
-        else:
-            note=f"supervised child cleanup failed: {termination_error}"
-            if original_error is not None:
-                original_error.add_note(note)
-            if cleanup_error is not None and original_error is not None:
-                original_error.add_note(f"additional cleanup failed: {cleanup_error}")
-            if original_error is None:
-                raise termination_error
-        if original_error is None and cleanup_error is not None:
-            raise cleanup_error
+        cleanup(lambda: release_owner_lock(lock,fd,lock_token))
+        if cleanup_error is not None:
+            if body_error is not None:
+                _add_exception_note(body_error, f"additional cleanup failed: {cleanup_error}")
+            elif termination_error is None:
+                raise cleanup_error
+        if body_error is None and termination_error is not None:
+            raise termination_error
 
 
 def main(argv: Optional[list[str]]=None) -> int:

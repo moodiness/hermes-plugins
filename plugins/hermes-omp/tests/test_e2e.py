@@ -84,14 +84,14 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         assert len(messages)==len(set(messages)) and any("q-001" in x for x in messages)
         assert any("answer=Proceed" in line for line in (paths.logs/"demo.jsonl").read_text().splitlines())
 
-        store=SessionStore(paths); session=store.load("demo"); session.omp_session_id="fake-session-001"; session.status="crashed"; store.save(session)
+        store=SessionStore(paths); session=store.load("demo"); session.omp_session_id="resume-session-002"; session.status="crashed"; store.save(session)
         restarted=spawn([sys.executable,"-m","hermes_omp.runtime","demo"],env=env)
         def restarted_with_resume() -> bool:
             try:
                 state=json.loads((tmp_path/"omp-state.json").read_text())
             except (FileNotFoundError, json.JSONDecodeError):
                 return False
-            return state["pid"]!=omp_pid and state["session_id"]=="fake-session-001"
+            return state["pid"]!=omp_pid and state["session_id"]=="resume-session-002"
         wait_for(restarted_with_resume)
         stop_process(restarted)
 
@@ -100,8 +100,8 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         assert "WantedBy=default.target" in SystemdBackend(paths.root).definition("demo",command,str(project),"on-failure")
         assert "LogonTrigger" in WindowsTaskBackend(paths.root).definition("demo",command,str(project),"on-failure")
 
-        assert store.load("demo").omp_session_id=="fake-session-001"
-        assert main(["create","duplicate","--cwd",str(project),"--model","fake","--mission","x","--resume","fake-session-001","--omp-path",str(fake_omp),"--no-install","--json"]) != 0
+        assert store.load("demo").omp_session_id=="resume-session-002"
+        assert main(["create","duplicate","--cwd",str(project),"--model","fake","--mission","x","--resume","resume-session-002","--omp-path",str(fake_omp),"--no-install","--json"]) != 0
         assert main(["remove","demo","--no-service"])==0
         assert not (paths.sessions/"demo.json").exists()
     finally:
