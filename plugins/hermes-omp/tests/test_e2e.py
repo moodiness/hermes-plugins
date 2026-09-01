@@ -52,11 +52,11 @@ def test_all_16_isolated_acceptance_scenarios(tmp_path: Path, monkeypatch) -> No
     (bridge/"hermes-restarted").write_text("simulated"); (bridge/"gateway-restarted").write_text("simulated")
     (bridge/"offline").unlink()
     outbox_path=paths.outbox/"demo.json"
-    if outbox_path.exists():
-        queued=json.loads(outbox_path.read_text())
-        for item in queued:
-            if item["state"]=="pending": item["next_attempt"]=0
-        outbox_path.write_text(json.dumps(queued))
+    wait_for(lambda: outbox_path.exists())
+    queued=json.loads(outbox_path.read_text())
+    for item in queued:
+        if item["state"]=="pending": item["next_attempt"]=0
+    outbox_path.write_text(json.dumps(queued))
     time.sleep(.5)
     proc.wait(timeout=10); assert proc.returncode==0
     delivered=[json.loads(x) for x in (bridge/"delivered.jsonl").read_text().splitlines()]

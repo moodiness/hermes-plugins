@@ -1,0 +1,1 @@
+{"name":"example","cwd":"/path/to/project","model":"gpt-5.6-sol-pro","platform":"telegram","chat":"CHAT_ID","topic":"TOPIC_ID","allowed_users":["USER_ID"],"restart_policy":"on-failure"}
