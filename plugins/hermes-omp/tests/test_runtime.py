@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+import hermes_omp.runtime as runtime_module
 
 from hermes_omp.core import Paths, Session, SessionStore
 from hermes_omp.bridge import FileInbox, HermesSendBridge
@@ -213,13 +214,7 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    return runtime_module._pid_alive(pid)
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
@@ -259,6 +254,7 @@ def test_terminate_child_signals_group_before_reaping(monkeypatch: pytest.Monkey
         events.append("waitid")
         return object() if killed else None
 
+
     def killpg(_pgid, sig):
         nonlocal killed
         if sig == 0:
@@ -279,6 +275,48 @@ def test_terminate_child_signals_group_before_reaping(monkeypatch: pytest.Monkey
 
     assert events == completed_events
     assert events.index("term") < events.index("kill") < events.index("wait")
+@pytest.mark.parametrize(
+    ("wait_result", "last_error", "expected"),
+    [(0x102, 0, True), (0, 0, False), (None, 87, False), (None, 5, True), (0xFFFFFFFF, 0, True)],
+)
+def test_windows_pid_probe_is_non_destructive_and_conservative(wait_result, last_error, expected) -> None:
+    class Function:
+        def __init__(self, call):
+            self.call = call
+
+        def __call__(self, *args):
+            return self.call(*args)
+
+    class Kernel:
+        def __init__(self):
+            self.closed = []
+            self.OpenProcess = Function(lambda *_: 0 if wait_result is None else 123)
+            self.WaitForSingleObject = Function(lambda *_: wait_result)
+            self.CloseHandle = Function(lambda handle: self.closed.append(handle) or True)
+
+    kernel = Kernel()
+    alive = runtime_module._windows_pid_alive(42, kernel32=kernel, get_last_error=lambda: last_error)
+    assert alive is expected
+    assert kernel.closed == ([] if wait_result is None else [123])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-handle liveness contract")
+def test_windows_pid_liveness_probe_does_not_terminate_real_child(tmp_path: Path) -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], text=True)
+    lock = tmp_path / "owner"
+    lock.write_text(json.dumps({"pid":child.pid,"session_id":"session","token":"test"}))
+    try:
+        assert runtime_module._pid_alive(child.pid)
+        assert runtime_module.owner_lock_live(lock)
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=2)
+
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group grace contract")

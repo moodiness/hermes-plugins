@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hermes_omp.cli import main
+from hermes_omp.runtime import owner_lock_live
 from hermes_omp.core import Paths, SessionStore
 from hermes_omp.service import LaunchdBackend, SystemdBackend, WindowsTaskBackend
 
@@ -72,7 +73,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         time.sleep(.2); assert proc.poll() is None
         good={**wrong,"event_id":"good","topic":"7","user":"9","answer":"1"}; (inbox/"good.json").write_text(json.dumps(good))
 
-        assert proc.poll() is None and os.kill(omp_pid,0) is None
+        assert proc.poll() is None and owner_lock_live(paths.run/"demo.owner")
         (bridge/"offline").unlink()
         proc.wait(timeout=10); assert proc.returncode==0
 

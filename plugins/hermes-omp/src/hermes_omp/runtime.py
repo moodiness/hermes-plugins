@@ -118,7 +118,39 @@ class RpcLineBuffer:
         return residue
 
 
+def _windows_pid_alive(pid: int, *, kernel32=None, get_last_error=None) -> bool:
+    if pid <= 0:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = kernel32 or ctypes.WinDLL("kernel32", use_last_error=True)
+    get_last_error = get_last_error or ctypes.get_last_error
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not handle:
+        return get_last_error() != 87  # ERROR_INVALID_PARAMETER means no such PID.
+    try:
+        result = kernel32.WaitForSingleObject(handle, 0)
+        if result == 0:  # WAIT_OBJECT_0
+            return False
+        if result == 0x102:  # WAIT_TIMEOUT
+            return True
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) calls TerminateProcess on Windows, so use a waitable handle.
+        return _windows_pid_alive(pid)
     if pid <= 0: return False
     try: os.kill(pid,0)
     except ProcessLookupError: return False
