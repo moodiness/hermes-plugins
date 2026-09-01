@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -63,8 +64,8 @@ class Runtime:
         self._save_state(); atomic_write(self.paths.run/f"{self.session.name}.question.json",json.dumps(self.question.to_dict())+"\n")
         automatic=classify_safe_answer(self.question) if self.auto_answer_safe else None
         if automatic:
-            rpc={"type":"extension_ui_response","id":self.question.id,"value":automatic}; self.question=None; self._save_state()
-            return {"rpc":rpc}
+            rpc={"type":"extension_ui_response","id":self.question.id,"value":automatic}
+            return {"rpc":rpc,"question_id":self.question.id}
         return {"event_id":f"question-{self.session.id}-{self.question.id}","platform":self.session.platform,"chat":self.session.chat,"topic":self.session.topic,"text":self.question.message()}
 
     def accept_inbound(self,event:dict[str,Any],now:Optional[float]=None) -> "InboundResult":
@@ -81,13 +82,41 @@ class Runtime:
                 self.seen.add(event_id); self._save_state(); return InboundResult(terminal=True)
             value=self.question.options[index].label
         response={"type":"extension_ui_response","id":self.question.id,"value":value}
-        self.seen.add(event_id); self.question=None; self._save_state(); self._touch(stamp); return InboundResult(response=response)
+        return InboundResult(response=response, question_id=self.question.id)
+
+    def commit_response(self, question_id: str, event_id: str = "", now: Optional[float] = None) -> None:
+        if not self.question or self.question.id != question_id:
+            raise ValueError("response does not match the pending question")
+        if event_id:
+            self.seen.add(event_id)
+        self.question=None
+        self._save_state()
+        (self.paths.run/f"{self.session.name}.question.json").unlink(missing_ok=True)
+        self._touch(now)
 
 
 class InboundResult(NamedTuple):
     response: Optional[dict[str,Any]] = None
     retryable: bool = False
     terminal: bool = False
+    question_id: str = ""
+
+class RpcLineBuffer:
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._buffer = ""
+
+    def feed(self, data: bytes) -> list[str]:
+        self._buffer += self._decoder.decode(data)
+        parts = self._buffer.split("\n")
+        self._buffer = parts.pop()
+        return [line[:-1] if line.endswith("\r") else line for line in parts]
+
+    def finish(self) -> str:
+        self._buffer += self._decoder.decode(b"", final=True)
+        residue = self._buffer
+        self._buffer = ""
+        return residue
 
 
 def _pid_alive(pid: int) -> bool:
@@ -154,18 +183,25 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
         assert child.stdin and child.stdout
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
-        while child.poll() is None:
+        line_buffer=RpcLineBuffer()
+        while child.poll() is None or selector.get_map():
             for key,_ in selector.select(timeout=.1):
                 while True:
-                    line=os.read(key.fileobj.fileno(),65536).decode("utf-8",errors="replace")
-                    if not line: break
-                    buffered = line.splitlines(True)
-                    for line in buffered:
+                    data=os.read(key.fileobj.fileno(),65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        break
+                    for line in line_buffer.feed(data):
                         try: event=parse_rpc_line(line)
-                        except ValueError: event={"type":"unparsed","content":str(redact(line.strip()))}
+                        except ValueError: event={"type":"unparsed","content":str(redact(line))}
                         with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
                         action=runtime.on_event(event)
-                        if action and action.get("rpc"): child.stdin.write(json.dumps(action["rpc"])+"\n"); child.stdin.flush()
+                        if action and action.get("rpc"):
+                            try:
+                                child.stdin.write(json.dumps(action["rpc"])+"\n"); child.stdin.flush()
+                            except (BrokenPipeError,OSError):
+                                continue
+                            runtime.commit_response(str(action["question_id"]))
                         elif action: outbox.enqueue(action["event_id"],action)
                         text=_event_text(event)
                         if text:
@@ -181,11 +217,21 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
                 if result.response:
                     try: child.stdin.write(json.dumps(result.response)+"\n"); child.stdin.flush()
                     except (BrokenPipeError,OSError): continue
+                    runtime.commit_response(result.question_id, str(event.get("event_id")))
                     inbox.ack(str(event.get("event_id")))
                 elif result.terminal: inbox.reject(str(event.get("event_id")))
             for item in outbox.due():
                 try: bridge.deliver(item.payload); outbox.ack(item.id)
                 except Exception as exc: outbox.fail(item.id,error=str(exc))
+        selector.close()
+        try:
+            child.stdin.close()
+        except (BrokenPipeError,OSError):
+            pass
+        residue=line_buffer.finish()
+        if residue:
+            event={"type":"unparsed","content":str(redact(residue))}
+            with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
         for item in outbox.due():
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
