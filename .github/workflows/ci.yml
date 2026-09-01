@@ -1,0 +1,31 @@
+name: plugins
+
+on: [push, pull_request]
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plugins.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plugins
+        shell: bash
+        run: echo "matrix=$(python scripts/plugin_matrix.py)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade 'pip>=21.3'
+      - run: python -m pip install -e "${{ matrix.path }}[dev]"
+      - run: python -m pytest -q "${{ matrix.path }}/tests"
+      - run: python -m build "${{ matrix.path }}"
+      - run: hermes plugins doctor "${{ matrix.plugin_path }}" --ci

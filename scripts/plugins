@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMMAND="${1:-all}"
+FILTER="${2:-}"
+
+mapfile_compat() {
+  PLUGINS=()
+  while IFS=$'\t' read -r id path plugin_path; do
+    [[ -z "$FILTER" || "$id" == "$FILTER" ]] && PLUGINS+=("$id|$path|$plugin_path")
+  done < <(python3 - "$ROOT/plugins.json" <<'PY'
+import json, sys
+for p in json.load(open(sys.argv[1]))["plugins"]:
+    print(p["id"], p["path"], p["plugin_path"], sep="\t")
+PY
+)
+  if [[ -n "$FILTER" && ${#PLUGINS[@]} -eq 0 ]]; then
+    echo "unknown plugin: $FILTER" >&2
+    exit 2
+  fi
+}
+
+run_for_plugins() {
+  local operation="$1" entry id rel plugin_rel dir
+  mapfile_compat
+  for entry in "${PLUGINS[@]}"; do
+    IFS='|' read -r id rel plugin_rel <<< "$entry"
+    dir="$ROOT/$rel"
+    echo "==> $operation $id" >&2
+    case "$operation" in
+      test) (cd "$dir" && python -m pytest -q) ;;
+      build) (cd "$dir" && rm -rf dist build && python -m build) ;;
+      doctor) hermes plugins doctor "$ROOT/$plugin_rel" --ci ;;
+    esac
+  done
+}
+
+case "$COMMAND" in
+  list)
+    mapfile_compat
+    for entry in "${PLUGINS[@]}"; do
+      IFS='|' read -r id rel _ <<< "$entry"
+      printf '%s\t%s\n' "$id" "$rel"
+    done
+    ;;
+  test|build|doctor) run_for_plugins "$COMMAND" ;;
+  all)
+    run_for_plugins test
+    run_for_plugins build
+    run_for_plugins doctor
+    ;;
+  *) echo "usage: $0 {list|test|build|doctor|all} [plugin-id]" >&2; exit 2 ;;
+esac

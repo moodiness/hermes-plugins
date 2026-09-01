@@ -25,6 +25,6 @@ packages = ["src/hermes_omp"]
 include = ["src", "plugin", "skills", "docs", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.hermes-plugins]
-plugin-path = "plugins/hermes-omp"
+plugin-path = "plugin"
 package-root = "."
 manifest = "plugin/plugin.yaml"

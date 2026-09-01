@@ -21,7 +21,8 @@ def test_developer_install_bootstraps_a_pep_660_capable_pip() -> None:
     assert editable in readme
     assert readme.index(upgrade) < readme.index(editable)
     assert upgrade in workflow
-    assert 'python -m pip install -e "${PLUGIN_ROOT}[dev]"' in workflow
+    assert "python -m pip install -e '.[dev]'" in workflow
+    assert "PLUGIN_ROOT" not in workflow
     assert "PYTHONPATH" not in workflow
 
 
@@ -39,9 +40,9 @@ def test_monorepo_migration_metadata_is_plugin_relative() -> None:
     pyproject=(root/"pyproject.toml").read_text()
     readme=(root/"README.md").read_text()
     workflow=(root/".github/workflows/ci.yml").read_text()
-    assert 'plugin-path = "plugins/hermes-omp"' in pyproject
+    assert 'plugin-path = "plugin"' in pyproject
     assert "plugins/hermes-omp/plugin" in readme
-    assert "PLUGIN_ROOT=plugins/hermes-omp" in workflow
+    assert "PLUGIN_ROOT=plugins/hermes-omp" not in workflow
     assert "/Users/" not in pyproject + workflow
 
 
