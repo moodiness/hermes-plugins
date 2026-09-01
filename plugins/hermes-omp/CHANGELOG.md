@@ -7,4 +7,4 @@
 - launchd backend; tested systemd/Windows definitions.
 - Isolated deterministic E2E suite and publishing documentation.
 - Fixed RC review blockers: durable follow-up RPC drain, restart-safe pending questions and replay protection, stale owner recovery, truthful inbound acknowledgement/rejection, Windows restart-policy generation, transactional create/adopt rollback, and stop-proven removal.
-- Added editable `.[dev]` installation so plain venv `pytest` works without `PYTHONPATH`.
+- Added editable `.[dev]` installation so plain venv `pytest` works without `PYTHONPATH`, including an explicit pip 21.3+ bootstrap for Python 3.9 venvs seeded with pip 21.2.4.

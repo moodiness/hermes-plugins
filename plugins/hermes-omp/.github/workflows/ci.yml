@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '${{ matrix.python }}'}
-      - run: python -m pip install pytest build
+      - run: python -m pip install --upgrade 'pip>=21.3'
+      - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
-        env: {PYTHONPATH: src}
       - run: python -m build

@@ -47,10 +47,13 @@ Outbound events have stable IDs and durable FIFO at-least-once delivery. Success
 
 ```sh
 python -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest -q
-.venv/bin/python -m build
+source .venv/bin/activate
+python -m pip install --upgrade 'pip>=21.3'
+python -m pip install -e '.[dev]'
+pytest -q
+python -m build
 ```
+
+The pip bootstrap is required because Python 3.9 may create a venv with pip 21.2.4, while Hatchling editable installs use PEP 660 support introduced in pip 21.3. Use `\.venv\Scripts\activate` on Windows.
 
 See `artifacts/` for recorded RED/GREEN and release verification evidence.

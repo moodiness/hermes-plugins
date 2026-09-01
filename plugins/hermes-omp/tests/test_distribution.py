@@ -10,6 +10,20 @@ def test_publication_docs_and_ci_exist() -> None:
     assert "TELEGRAM_BOT_TOKEN" not in all_text and "/Users/admin" not in all_text
 
 
+def test_developer_install_bootstraps_a_pep_660_capable_pip() -> None:
+    root=Path(__file__).parents[1]
+    readme=(root/"README.md").read_text()
+    workflow=(root/".github/workflows/ci.yml").read_text()
+    upgrade="python -m pip install --upgrade 'pip>=21.3'"
+    editable="python -m pip install -e '.[dev]'"
+    assert upgrade in readme
+    assert editable in readme
+    assert readme.index(upgrade) < readme.index(editable)
+    assert upgrade in workflow
+    assert editable in workflow
+    assert "PYTHONPATH" not in workflow
+
+
 def test_no_prohibited_runtime_coupling() -> None:
     root=Path(__file__).parents[1]
     production="\n".join(p.read_text() for p in (root/"src").rglob("*.py"))
