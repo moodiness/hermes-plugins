@@ -47,8 +47,9 @@ Outbound events have stable IDs and durable FIFO at-least-once delivery. Success
 
 ```sh
 python -m venv .venv
-.venv/bin/pip install pytest build
-PYTHONPATH=src .venv/bin/pytest -q
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest -q
 .venv/bin/python -m build
 ```
 

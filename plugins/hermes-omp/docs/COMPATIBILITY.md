@@ -9,4 +9,6 @@
 | Linux systemd-user | modern systemd | generator + CI unit tests only |
 | Windows Task Scheduler | Windows 2022+ | XML generator + CI unit tests only |
 
+Windows Task Scheduler has no direct equivalent of systemd's unlimited `Restart=always`: `never` omits restart settings, `on-failure` retries failures three times, and `always` uses Task Scheduler's maximum practical configured retry count (999). Task Scheduler restarts only failures, so a clean exit cannot be forced to restart by task XML alone.
+
 Semantic Versioning is used. State schema migrations are forward-only, atomic, and reject newer unknown versions. RC releases are local artifacts until explicitly approved.
