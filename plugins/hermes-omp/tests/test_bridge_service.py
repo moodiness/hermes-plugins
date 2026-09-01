@@ -9,7 +9,8 @@ from hermes_omp.bridge import FileInbox, HermesSendBridge
 from hermes_omp.service import LaunchdBackend, SystemdBackend, WindowsTaskBackend, backend_for
 
 
-def test_hermes_send_uses_stdin_and_no_secret_or_message_in_argv(tmp_path: Path) -> None:
+def test_hermes_send_uses_stdin_and_no_secret_or_message_in_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     calls = []
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -20,7 +21,7 @@ def test_hermes_send_uses_stdin_and_no_secret_or_message_in_argv(tmp_path: Path)
     assert argv[:2] == ["/fake/hermes", "send"]
     assert "super secret body" not in " ".join(argv)
     assert kwargs["input"] == "super secret body"
-    assert kwargs["env"]["HERMES_HOME"] == str(tmp_path) if False else True
+    assert kwargs["env"]["HERMES_HOME"] == str(tmp_path)
 
 
 def test_file_inbox_is_replaceable_public_contract_and_exactly_once(tmp_path: Path) -> None:
