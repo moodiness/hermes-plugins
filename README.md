@@ -22,7 +22,7 @@ Commands resolve the repository from their own location, so they work from any c
 ./scripts/plugins all
 ```
 
-`test`, `build`, and `doctor` may also take one plugin id. Builds are emitted inside that plugin's `dist/` directory. Doctor validates the plugin directory without installing it.
+`test`, `build`, and `doctor` may also take one plugin id. Test and build commands create/reuse an ignored `.venv-verify` in each plugin, upgrade it to `pip>=21.3`, and install that plugin's `.[dev]` extra. Set `PLUGIN_VERIFY_PYTHON=/path/to/python` to choose the base Python used to create verification environments and read the catalog. Builds preserve tracked release artifacts, add freshly built distributions, then deterministically refresh and verify `dist/SHA256SUMS`. Doctor validates the plugin directory without installing it.
 
 ## Install a plugin
 

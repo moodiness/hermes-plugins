@@ -36,6 +36,22 @@ def test_shared_list_script_discovers_nested_plugin_from_any_cwd(tmp_path: Path)
     assert result.stdout.splitlines() == ["hermes-omp\tplugins/hermes-omp"]
 
 
+def test_shared_script_uses_an_isolated_plugin_verification_environment() -> None:
+    script = (ROOT / "scripts" / "plugins").read_text()
+    assert ".venv-verify" in script
+    assert "pip>=21.3" in script
+    assert ".[dev]" in script
+    assert "python -m pytest" not in script
+    assert "rm -rf dist build" not in script
+
+
+def test_shared_build_refreshes_and_checks_release_checksums() -> None:
+    script = (ROOT / "scripts" / "plugins").read_text()
+    assert "SHA256SUMS" in script
+    assert "shasum -a 256 -c" in script
+    assert 'shasum -a 256 "dist/$relative"' in script
+
+
 def test_repository_policy_files_exist() -> None:
     for relative in ["README.md", "LICENSE", "CONTRIBUTING.md", "RELEASING.md", ".github/workflows/ci.yml"]:
         assert (ROOT / relative).is_file(), relative
