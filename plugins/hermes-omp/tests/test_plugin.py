@@ -8,7 +8,8 @@ from pathlib import Path
 def load_plugin():
     root=Path(__file__).parents[1]/"plugin"
     spec=importlib.util.spec_from_file_location("hermes_omp_plugin",root/"__init__.py",submodule_search_locations=[str(root)])
-    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+    import sys
+    module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module); return module
 
 
 def test_plugin_registers_only_public_cli_command() -> None:
