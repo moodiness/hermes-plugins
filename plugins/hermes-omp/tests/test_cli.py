@@ -48,6 +48,32 @@ def test_duplicate_omp_session_id_is_rejected(tmp_path: Path, capsys) -> None:
     assert rc == cli.EXIT_VALIDATION and "already owned" in json.loads(out)["error"]["message"]
 
 
+def test_same_name_create_conflicts_without_overwriting_or_deleting(
+    tmp_path: Path, capsys
+) -> None:
+    first = (
+        "create", "demo", "--cwd", str(tmp_path), "--model", "first",
+        "--mission", "original", "--omp-path", "/bin/true", "--no-install",
+    )
+    assert invoke(tmp_path, capsys, *first)[0] == 0
+    paths = Paths.discover()
+    session_path = paths.sessions / "demo.json"
+    omp_path = paths.run / "demo.omp-path"
+    original_session = session_path.read_bytes()
+    original_omp_path = omp_path.read_bytes()
+
+    rc, out = invoke(
+        tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path),
+        "--model", "second", "--mission", "replacement", "--resume", "other-id",
+        "--omp-path", "/different/omp", "--no-install", "--json",
+    )
+
+    assert rc == cli.EXIT_CONFLICT
+    assert json.loads(out)["error"]["code"] == "conflict"
+    assert session_path.read_bytes() == original_session
+    assert omp_path.read_bytes() == original_omp_path
+
+
 def test_adopt_uses_explicit_inspection_file_not_process_mutation(tmp_path: Path, capsys) -> None:
     inspection=tmp_path/"inspection.json"; inspection.write_text(json.dumps({"argv":["omp","--resume","sid","--model","m"],"cwd":str(tmp_path)}))
     rc,out=invoke(tmp_path,capsys,"adopt","adopted","--inspection",str(inspection),"--mission","continue","--omp-path","/bin/true","--no-install","--json")

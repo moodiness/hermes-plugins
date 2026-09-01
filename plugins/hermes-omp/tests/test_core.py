@@ -7,6 +7,10 @@ import time
 from pathlib import Path
 
 import pytest
+import sys
+from types import SimpleNamespace
+
+import hermes_omp.core as core
 
 from hermes_omp.core import (
     Authorization,
@@ -109,3 +113,100 @@ def test_outbox_deduplicates_orders_retries_and_dead_letters(tmp_path: Path) -> 
     assert outbox.pending() == []
     reloaded = Outbox(tmp_path / "outbox.json")
     assert reloaded.dead_letters()[0].id == "a"
+
+
+def test_stale_writers_preserve_fifo_and_unrelated_items(tmp_path: Path) -> None:
+    path = tmp_path / "outbox.json"
+    first = Outbox(path)
+    second = Outbox(path)
+
+    assert first.enqueue("a", {"n": 1})
+    assert second.enqueue("b", {"n": 2})
+    assert [item.id for item in Outbox(path).items] == ["a", "b"]
+
+    first.ack("a")
+    assert [(item.id, item.state) for item in Outbox(path).items] == [
+        ("a", "delivered"),
+        ("b", "pending"),
+    ]
+
+
+def test_stale_fail_and_retry_preserve_concurrent_items(tmp_path: Path) -> None:
+    path = tmp_path / "outbox.json"
+    seed = Outbox(path, max_attempts=1)
+    seed.enqueue("dead", {"n": 1})
+    stale_fail = Outbox(path, max_attempts=1)
+    stale_retry = Outbox(path, max_attempts=1)
+    concurrent = Outbox(path, max_attempts=1)
+
+    concurrent.enqueue("other", {"n": 2})
+    stale_fail.fail("dead", error="offline")
+    assert [(item.id, item.state) for item in Outbox(path).items] == [
+        ("dead", "dead"),
+        ("other", "pending"),
+    ]
+
+    Outbox(path).enqueue("later", {"n": 3})
+    assert stale_retry.retry("dead") == ["dead"]
+    assert [(item.id, item.state) for item in Outbox(path).items] == [
+        ("dead", "pending"),
+        ("other", "pending"),
+        ("later", "pending"),
+    ]
+
+
+def test_stale_reader_refreshes_every_public_view(tmp_path: Path) -> None:
+    path = tmp_path / "outbox.json"
+    reader = Outbox(path)
+    writer = Outbox(path, max_attempts=1)
+    writer.enqueue("pending", {"n": 1})
+    writer.enqueue("dead", {"n": 2})
+    writer.fail("dead", error="offline")
+
+    assert [item.id for item in reader.items] == ["pending", "dead"]
+    assert [item.id for item in reader.pending()] == ["pending"]
+    assert [item.id for item in reader.due(now=time.time())] == ["pending"]
+    assert [item.id for item in reader.dead_letters()] == ["dead"]
+
+
+def test_stale_writer_does_not_overwrite_malformed_queue(tmp_path: Path) -> None:
+    path = tmp_path / "outbox.json"
+    writer = Outbox(path)
+    path.write_bytes(b"{not-json")
+
+    with pytest.raises(json.JSONDecodeError):
+        writer.enqueue("new", {"n": 1})
+
+    assert path.read_bytes() == b"{not-json"
+
+
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+def test_path_lock_uses_platform_lock_and_releases_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    if platform == "posix":
+        manager = SimpleNamespace(
+            LOCK_EX="exclusive",
+            LOCK_UN="unlock",
+            flock=lambda fd, mode: calls.append((fd, mode)),
+        )
+        monkeypatch.setitem(sys.modules, "fcntl", manager)
+    else:
+        manager = SimpleNamespace(
+            LK_LOCK="exclusive",
+            LK_UNLCK="unlock",
+            locking=lambda fd, mode, size: calls.append((fd, mode, size)),
+        )
+        monkeypatch.setitem(sys.modules, "msvcrt", manager)
+    monkeypatch.setattr(core.os, "name", platform)
+    path = tmp_path / "queue.json"
+
+    with pytest.raises(RuntimeError, match="inside lock"):
+        with core._path_lock(path):
+            with core._path_lock(path):
+                assert path.with_name("queue.json.lock").read_bytes() == b"\0"
+                raise RuntimeError("inside lock")
+
+    modes = [call[1] for call in calls]
+    assert modes == ["exclusive", "unlock"]

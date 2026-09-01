@@ -85,17 +85,43 @@ def _install(session: Session, no_install: bool, start: bool, paths: Paths) -> N
     if start: backend.start(session.name)
 
 
-def _rollback_create(session: Session, paths: Paths) -> None:
-    try: backend_for(root=paths.root).remove(session.name)
-    except Exception: pass
-    for target in (paths.sessions / f"{session.name}.json", paths.run / f"{session.name}.omp-path"): target.unlink(missing_ok=True)
+def _restore_file(path: Path, backup: Optional[bytes]) -> None:
+    if backup is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic_write(path, backup.decode("utf-8"))
 
 
-def _persist_and_install(session: Session, omp_path: str, no_install: bool, start: bool, paths: Paths) -> None:
-    SessionStore(paths).save(session); atomic_write(paths.run / f"{session.name}.omp-path", omp_path + "\n")
-    try: _install(session, no_install, start, paths)
+def _rollback_create(session: Session, paths: Paths, backups: dict[Path, Optional[bytes]]) -> None:
+    try:
+        backend_for(root=paths.root).remove(session.name)
     except Exception:
-        _rollback_create(session, paths); raise
+        pass
+    for target, backup in backups.items():
+        _restore_file(target, backup)
+
+
+def _persist_and_install(session: Session, omp_path: str, no_install: bool, start: bool, paths: Paths, *, replace: bool = False) -> None:
+    store = SessionStore(paths)
+    session_path = paths.sessions / f"{session.name}.json"
+    omp_path_file = paths.run / f"{session.name}.omp-path"
+    backups = {
+        session_path: session_path.read_bytes() if session_path.exists() else None,
+        omp_path_file: omp_path_file.read_bytes() if omp_path_file.exists() else None,
+    }
+    try:
+        if replace:
+            store.replace(session)
+        else:
+            store.create(session)
+    except FileExistsError as exc:
+        raise CliError(f"session already exists: {session.name}", "conflict", EXIT_CONFLICT) from exc
+    try:
+        atomic_write(omp_path_file, omp_path + "\n")
+        _install(session, no_install, start, paths)
+    except Exception:
+        _rollback_create(session, paths, backups)
+        raise
 
 
 def _owner_live(paths: Paths, name: str) -> bool:
@@ -224,8 +250,6 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
             session = Session.new(name=args.name, cwd=info["cwd"], model=info["model"], mission=args.mission, platform=args.platform, chat=args.chat, topic=args.topic, allowed_users=args.allowed_user, restart_policy=args.restart_policy, omp_session_id=info["omp_session_id"], plugin_version=__version__, omp_version="adopted")
         if args.dry_run:
             _emit(args, {"dry_run": True, "session": dataclasses.asdict(session), "service_definition": _definition(session, paths), "would_install": not args.no_install, "would_start": args.start}); return EXIT_OK
-        store = SessionStore(paths)
-        store.assert_unique_omp_id(session.omp_session_id)
         _persist_and_install(session, args.omp_path, args.no_install, args.start, paths); _emit(args, dataclasses.asdict(session), f"Created {session.name}"); return EXIT_OK
     store = SessionStore(paths)
     if args.command == "list":
@@ -270,6 +294,7 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
                 while (paths.sessions / f"{name}-{counter}.json").exists(): counter += 1
                 name = f"{name}-{counter}"
             elif _owner_live(paths, name): raise CliError("cannot replace an active session", "conflict", EXIT_CONFLICT)
+        replacing = existing.exists() and args.conflict == "replace"
         session_data = dataclasses.asdict(source); session_data.update({"name": name, "id": Session.new(name=name, cwd=source.cwd, model=source.model, mission=source.mission).id, "supervisor_pid": 0, "omp_pid": 0, "status": "imported", "plugin_version": __version__}); session = Session(**session_data)
         plan = {"dry_run": args.dry_run, "name": name, "conflict": args.conflict, "service_definition": _definition(session, paths)}
         if args.dry_run: _emit(args, plan, f"Would import as {name}"); return EXIT_OK
@@ -278,7 +303,7 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         for target in targets:
             if target.exists(): backups[target] = target.read_bytes()
         try:
-            _persist_and_install(session, str(archive.get("omp_path") or "omp"), args.no_install, args.start, paths)
+            _persist_and_install(session, str(archive.get("omp_path") or "omp"), args.no_install, args.start, paths, replace=replacing)
             runtime = archive.get("runtime") or {}
             if runtime: atomic_write(targets[2], json.dumps(runtime, indent=2) + "\n")
         except Exception:

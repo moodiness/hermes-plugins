@@ -93,6 +93,70 @@ def test_export_import_dry_run_conflicts_validation_and_secret_exclusion(tmp_pat
     assert rc == cli.EXIT_VALIDATION and json.loads(out)["error"]["code"] == "validation"
 
 
+def test_imported_omp_id_cannot_be_duplicated_by_rename(tmp_path: Path, capsys) -> None:
+    rc, _, _ = invoke(
+        tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path),
+        "--model", "m", "--mission", "go", "--resume", "owned-id",
+        "--omp-path", "/bin/true", "--no-install",
+    )
+    assert rc == 0
+    archive = tmp_path / "archive.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+
+    rc, out, _ = invoke(
+        tmp_path, capsys, "import", str(archive), "--conflict", "rename",
+        "--no-install", "--json",
+    )
+
+    assert rc == cli.EXIT_VALIDATION
+    assert json.loads(out)["error"]["code"] == "validation"
+    assert "already owned" in json.loads(out)["error"]["message"]
+    assert not (Paths.discover().sessions / "demo-2.json").exists()
+
+
+def test_replace_import_restores_all_tracked_files_on_failure(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    paths = Paths.discover()
+    runtime_path = paths.run / "demo.runtime.json"
+    runtime_path.write_text('{"original": true}\n')
+    archive = tmp_path / "archive.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+    value = json.loads(archive.read_text())
+    value["session"]["model"] = "replacement"
+    value["omp_path"] = "/replacement/omp"
+    value["runtime"] = {"replacement": True}
+    archive.write_text(json.dumps(value))
+    targets = [
+        paths.sessions / "demo.json",
+        paths.run / "demo.omp-path",
+        runtime_path,
+    ]
+    originals = {target: target.read_bytes() for target in targets}
+
+
+    class BrokenBackend:
+        def definition(self, *args, **kwargs):
+            return {"fake": True}
+
+        def install(self, *args, **kwargs):
+            raise RuntimeError("install failed")
+
+        def remove(self, name):
+            pass
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: BrokenBackend())
+
+    with pytest.raises(RuntimeError, match="install failed"):
+        invoke(
+            tmp_path, capsys, "import", str(archive), "--conflict", "replace",
+            "--json",
+        )
+
+    assert {target: target.read_bytes() for target in targets} == originals
+
+
 def test_update_requires_explicit_restart_for_live_session_and_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
     create(tmp_path, capsys)
     paths = Paths.discover()

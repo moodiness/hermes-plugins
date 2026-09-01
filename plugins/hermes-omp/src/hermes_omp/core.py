@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import secrets
 import stat
 import time
+import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -18,6 +20,72 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s&\"']+"),
     re.compile(r"(?i)([?&](?:token|key|secret|password)=)[^&\s]+"),
 ]
+
+
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCK_DEPTH = threading.local()
+
+
+def _normalized_path(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path.expanduser())))
+
+
+@contextlib.contextmanager
+def _path_lock(path: Path):
+    key = _normalized_path(path)
+    with _PATH_LOCKS_GUARD:
+        thread_lock = _PATH_LOCKS.setdefault(key, threading.RLock())
+    with thread_lock:
+        depths = getattr(_PATH_LOCK_DEPTH, "depths", None)
+        if depths is None:
+            depths = {}
+            _PATH_LOCK_DEPTH.depths = depths
+        depth = depths.get(key, 0)
+        depths[key] = depth + 1
+        if depth:
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+            return
+
+        lock_path = path.with_name(path.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        locked = False
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            locked = True
+            yield
+        finally:
+            try:
+                if locked:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+                depths.pop(key, None)
 
 
 def atomic_write(path: Path, data: str, mode: int = 0o600) -> None:
@@ -125,6 +193,23 @@ class SessionStore:
     def __init__(self, paths: Paths):
         self.paths = paths
         paths.ensure()
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.paths.sessions / ".store"
+
+    def create(self, session: Session) -> None:
+        path = self.paths.sessions / f"{slug(session.name)}.json"
+        with _path_lock(self._lock_path):
+            if path.exists():
+                raise FileExistsError(path)
+            self.assert_unique_omp_id(session.omp_session_id)
+            self.save(session)
+
+    def replace(self, session: Session) -> None:
+        with _path_lock(self._lock_path):
+            self.assert_unique_omp_id(session.omp_session_id, except_name=session.name)
+            self.save(session)
 
     def save(self, session: Session) -> None:
         atomic_write(self.paths.sessions / f"{slug(session.name)}.json", json.dumps(dataclasses.asdict(session), indent=2, sort_keys=True) + "\n")
@@ -263,36 +348,80 @@ class OutboxItem:
 class Outbox:
     def __init__(self, path: Path, max_attempts: int = 8, base_delay: float = 2, jitter: Callable[[], float] = lambda: secrets.randbelow(1000) / 1000):
         self.path, self.max_attempts, self.base_delay, self.jitter = path, max_attempts, base_delay, jitter
-        self.items: list[OutboxItem] = []
-        if path.exists(): self.items = [OutboxItem(**x) for x in json.loads(path.read_text())]
+        self._items: list[OutboxItem] = []
+        with _path_lock(self.path):
+            self._reload()
 
-    def _save(self) -> None: atomic_write(self.path, json.dumps([dataclasses.asdict(x) for x in self.items], indent=2) + "\n")
+    def _reload(self) -> None:
+        self._items = [OutboxItem(**x) for x in json.loads(self.path.read_text())] if self.path.exists() else []
+
+    def _save(self) -> None:
+        atomic_write(self.path, json.dumps([dataclasses.asdict(x) for x in self._items], indent=2) + "\n")
+
+    @property
+    def items(self) -> list[OutboxItem]:
+        with _path_lock(self.path):
+            self._reload()
+            return list(self._items)
+
     def enqueue(self, event_id: str, payload: dict[str, Any]) -> bool:
-        if any(x.id == event_id for x in self.items): return False
-        self.items.append(OutboxItem(event_id, payload, created_at=time.time())); self._save(); return True
-    def pending(self) -> list[OutboxItem]: return [x for x in self.items if x.state == "pending"]
+        with _path_lock(self.path):
+            self._reload()
+            if any(x.id == event_id for x in self._items):
+                return False
+            self._items.append(OutboxItem(event_id, payload, created_at=time.time()))
+            self._save()
+            return True
+
+    def pending(self) -> list[OutboxItem]:
+        items = self.items
+        return [x for x in items if x.state == "pending"]
+
     def due(self, now: Optional[float] = None) -> list[OutboxItem]:
         stamp = time.time() if now is None else now
-        pending = [x for x in self.items if x.state == "pending"]
-        if not pending or pending[0].next_attempt > stamp: return []
+        items = self.items
+        pending = [x for x in items if x.state == "pending"]
+        if not pending or pending[0].next_attempt > stamp:
+            return []
         return [pending[0]]
+
     def ack(self, event_id: str) -> None:
-        for x in self.items:
-            if x.id == event_id: x.state = "delivered"
-        self._save()
+        with _path_lock(self.path):
+            self._reload()
+            for item in self._items:
+                if item.id == event_id:
+                    item.state = "delivered"
+            self._save()
+
     def fail(self, event_id: str, now: Optional[float] = None, error: str = "") -> None:
         stamp = time.time() if now is None else now
-        for x in self.items:
-            if x.id == event_id:
-                x.attempts += 1; x.error = str(redact(error))
-                if x.attempts >= self.max_attempts: x.state = "dead"
-                else: x.next_attempt = stamp + min(60.0, self.base_delay * (2 ** (x.attempts - 1))) + self.jitter()
-        self._save()
-    def dead_letters(self) -> list[OutboxItem]: return [x for x in self.items if x.state == "dead"]
+        with _path_lock(self.path):
+            self._reload()
+            for item in self._items:
+                if item.id == event_id:
+                    item.attempts += 1
+                    item.error = str(redact(error))
+                    if item.attempts >= self.max_attempts:
+                        item.state = "dead"
+                    else:
+                        item.next_attempt = stamp + min(60.0, self.base_delay * (2 ** (item.attempts - 1))) + self.jitter()
+            self._save()
+
+    def dead_letters(self) -> list[OutboxItem]:
+        items = self.items
+        return [x for x in items if x.state == "dead"]
+
     def retry(self, event_id: Optional[str] = None) -> list[str]:
-        retried = []
-        for item in self.items:
-            if item.state == "dead" and (event_id is None or item.id == event_id):
-                item.state = "pending"; item.attempts = 0; item.next_attempt = 0.0; item.error = ""; retried.append(item.id)
-        if retried: self._save()
-        return retried
+        with _path_lock(self.path):
+            self._reload()
+            retried = []
+            for item in self._items:
+                if item.state == "dead" and (event_id is None or item.id == event_id):
+                    item.state = "pending"
+                    item.attempts = 0
+                    item.next_attempt = 0.0
+                    item.error = ""
+                    retried.append(item.id)
+            if retried:
+                self._save()
+            return retried
