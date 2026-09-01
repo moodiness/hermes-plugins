@@ -1,4 +1,4 @@
-name: hermes_omp
+name: omp
 version: 0.1.0rc1
 description: Durable Oh My Pi RPC supervision through Hermes public CLI and messaging interfaces.
 author: hermes-omp contributors

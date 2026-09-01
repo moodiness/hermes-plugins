@@ -1,0 +1,27 @@
+{
+  "ok": true,
+  "plugin_version": "0.1.0rc1",
+  "checks": {
+    "omp": {
+      "ok": true,
+      "path": "/bin/true",
+      "version": "unavailable"
+    },
+    "hermes_send": {
+      "ok": true,
+      "path": "/bin/true",
+      "version": "unavailable"
+    },
+    "state": {
+      "ok": true,
+      "path": "/private/var/folders/3n/zf_mby8x7mv4ps_pmwbzrts80000gn/T/tmp.BQgSis4axQ/home/omp"
+    },
+    "service_backend": {
+      "ok": true,
+      "name": "LaunchdBackend"
+    }
+  },
+  "state_db_used": false,
+  "telegram_api_used": false,
+  "inbound_contract": "atomic JSON envelopes in $HERMES_HOME/omp/inbox/<session>"
+}

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def _src() -> Path:
-    candidates = [Path(__file__).resolve().parents[1] / "src", Path(__file__).resolve().parents[2] / "src"]
+    candidates = [Path(__file__).resolve().parent / "src", Path(__file__).resolve().parents[1] / "src", Path(__file__).resolve().parents[2] / "src"]
     return next((x for x in candidates if (x / "hermes_omp").is_dir()), candidates[0])
 
 
