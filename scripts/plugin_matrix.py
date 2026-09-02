@@ -9,7 +9,7 @@ catalog = json.loads((root / "plugins.json").read_text())
 include = []
 for plugin in catalog["plugins"]:
     for os_name in ("ubuntu-latest", "macos-latest", "windows-latest"):
-        for python in ("3.9", "3.11", "3.13"):
+        for python in ("3.10", "3.11", "3.13"):
             include.append({
                 "plugin": plugin["id"],
                 "path": plugin["path"],

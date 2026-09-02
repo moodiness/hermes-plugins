@@ -11,7 +11,7 @@
       "manifest": "plugins/hermes-omp/plugin/plugin.yaml",
       "autonomous": true,
       "license": "MIT",
-      "python": ">=3.9",
+      "python": ">=3.10",
       "source_commit": "625a7b015d3bd87c6eb4ed2a2e55ed0819a1a61a",
       "history_preserved": true
     }

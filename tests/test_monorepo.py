@@ -20,6 +20,7 @@ def test_catalog_describes_each_discovered_plugin() -> None:
     assert "source_repository" not in item
     assert item["source_commit"] == "625a7b015d3bd87c6eb4ed2a2e55ed0819a1a61a"
     assert item["autonomous"] is True
+    assert item["python"] == ">=3.10"
 
 
 def test_plugin_metadata_is_nested_root_relative() -> None:
@@ -30,6 +31,21 @@ def test_plugin_metadata_is_nested_root_relative() -> None:
     assert 'package-root = "."' in pyproject
     assert "plugins/hermes-omp/plugin" in readme
     assert "PLUGIN_ROOT=plugins/hermes-omp" not in workflow
+
+
+def test_plugin_dev_dependencies_use_patched_pytest() -> None:
+    pyproject = (PLUGIN / "pyproject.toml").read_text()
+    assert 'requires-python = ">=3.10"' in pyproject
+    assert '"pytest==9.0.3"' in pyproject
+    assert 'pytest==8.4.2' not in pyproject
+
+
+def test_ci_matrix_starts_at_supported_python() -> None:
+    matrix_script = (ROOT / "scripts" / "plugin_matrix.py").read_text()
+    standalone_workflow = (PLUGIN / ".github" / "workflows" / "ci.yml").read_text()
+    assert '("3.10", "3.11", "3.13")' in matrix_script
+    assert "['3.10', '3.11', '3.13']" in standalone_workflow
+
 
 
 def test_shared_list_script_discovers_nested_plugin_from_any_cwd(tmp_path: Path) -> None:

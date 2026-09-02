@@ -6,7 +6,7 @@ This matrix applies to hermes-omp `0.3.0rc1`.
 |---|---|---|
 | Hermes Agent | 0.21.0, tag `v2026.8.31`, commit `29112bef099274229cadff79cdff7bf7b99c4b77` | Wider Hermes versions are unverified; no broader minimum is claimed |
 | Hermes host Python | `>=3.11,<3.14` | This is Hermes's interpreter range |
-| Declared standalone package CI matrix | Python 3.9, 3.11, and 3.13 on Linux, macOS, and Windows | This cross-OS matrix is configured but was not executed by the local validation; Python 3.9 does not make it a supported Hermes host interpreter |
+| Declared standalone package CI matrix | Python 3.10, 3.11, and 3.13 on Linux, macOS, and Windows | This cross-OS matrix is configured but was not executed by the local validation; Python 3.10 does not make it a supported Hermes host interpreter |
 | OMP | 18.0.10 baseline | RPC behavior is exercised with a deterministic fake; wider native OMP compatibility is unverified |
 | Editable development install | pip 21.3+ | PEP 660 support is required by Hatchling |
 | macOS launchd | Definition and injected-runner tests; local fake-process runtime | No real active service, restart, logout, or reboot test |

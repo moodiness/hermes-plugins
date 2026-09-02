@@ -4,7 +4,7 @@ Standalone Hermes plugin for durable Oh My Pi (OMP) RPC sessions. The Python dis
 
 ## Verified scope
 
-Version `0.3.0rc1` targets Hermes Agent 0.21.0 (tag `v2026.8.31`, commit `29112bef099274229cadff79cdff7bf7b99c4b77`). Hermes runs on Python `>=3.11,<3.14`; the standalone package declares Python `>=3.9` and its CI matrix includes 3.9, 3.11, and 3.13, but this local validation does not establish that cross-OS matrix. Wider Hermes compatibility is not established.
+Version `0.3.0rc1` targets Hermes Agent 0.21.0 (tag `v2026.8.31`, commit `29112bef099274229cadff79cdff7bf7b99c4b77`). Hermes runs on Python `>=3.11,<3.14`; the standalone package declares Python `>=3.10` and its CI matrix includes 3.10, 3.11, and 3.13, but this local validation does not establish that cross-OS matrix. Wider Hermes compatibility is not established.
 
 Runtime behavior has been exercised locally on macOS; launchd, systemd-user, and Windows Task Scheduler definitions and manager calls are covered with injected runners, not real active services or native managers. Subprocess E2E uses temporary state plus fake OMP and fake Hermes executables; it does not exercise a real gateway, channel, service manager, restart, or reboot.
 

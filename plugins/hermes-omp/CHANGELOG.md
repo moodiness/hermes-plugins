@@ -37,4 +37,4 @@
 - Added the standalone native plugin registration, schema-v2 session state, OMP RPC runtime, correlation/authorization, and durable outbox.
 - Added a launchd backend and generated systemd-user/Windows definitions; no native Linux/Windows manager validation was performed.
 - Added isolated subprocess E2E using fake OMP and fake Hermes executables, without real services, gateway traffic, restart, or reboot coverage.
-- Added editable `.[dev]` installation with a pip 21.3+ bootstrap for Python 3.9 development environments.
+- Added editable `.[dev]` installation with a pip 21.3+ bootstrap for supported development environments.
