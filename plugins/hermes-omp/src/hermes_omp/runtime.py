@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .bridge import FileInbox, HermesSendBridge
-from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, atomic_write, classify_safe_answer, parse_rpc_line, redact
+from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, _path_lock, atomic_write, classify_safe_answer, parse_rpc_line, redact
 from .logging import StructuredLog
 
 RESTART_BUDGET_EXIT = 0
@@ -85,17 +85,21 @@ class Runtime:
         return {"allowed":not limit_reached and cooldown_remaining<=0,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
 
     def claim_launch(self, now: Optional[float]=None) -> dict[str, Any]:
-        stamp=time.time() if now is None else now
-        window=self.session.restart_window_seconds
-        recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
-        cooldown_remaining=max(0.0,(recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
-        restarts=max(0,len(recent)-1)
-        allowed=(not self.session.max_restarts or restarts < self.session.max_restarts) and cooldown_remaining <= 0
-        status={"allowed":allowed,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
-        if allowed:
-            recent.append(stamp)
-            self.launch_attempts=recent; self.restarts=recent; self._save_state()
-        return status
+        with _path_lock(self.state_path):
+            state=json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+            self.launch_attempts=[float(x) for x in state.get("launch_attempts",state.get("restarts",[]))]
+            self.restarts=self.launch_attempts
+            stamp=time.time() if now is None else now
+            window=self.session.restart_window_seconds
+            recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
+            cooldown_remaining=max(0.0,(recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
+            restarts=max(0,len(recent)-1)
+            allowed=(not self.session.max_restarts or restarts < self.session.max_restarts) and cooldown_remaining <= 0
+            status={"allowed":allowed,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+            if allowed:
+                recent.append(stamp)
+                self.launch_attempts=recent; self.restarts=recent; self._save_state()
+            return status
 
     def record_restart(self, now: Optional[float]=None) -> dict[str, Any]:
         stamp=time.time() if now is None else now

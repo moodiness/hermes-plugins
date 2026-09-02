@@ -44,7 +44,8 @@ def test_structured_log_rotates_bounds_records_redacts_and_filters(tmp_path: Pat
     for index in range(20):
         assert log.write({"type": "turn_end", "timestamp": index, "token": sentinel, "content": "x" * 400})
     files = [path, path.with_name(path.name + ".1"), path.with_name(path.name + ".2")]
-    assert all(item.stat().st_mode & 0o077 == 0 for item in files if item.exists())
+    if os.name != "nt":
+        assert all(item.stat().st_mode & 0o077 == 0 for item in files if item.exists())
     assert sum(item.stat().st_size for item in files if item.exists()) <= 3 * 500
     raw = b"".join(item.read_bytes() for item in files if item.exists())
     assert sentinel.encode() not in raw

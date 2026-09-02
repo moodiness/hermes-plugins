@@ -107,11 +107,10 @@ def test_windows_checkout_preserves_lf_line_endings() -> None:
     assert test_step["env"]["MSYS_NO_PATHCONV"] == "1"
 
 
-def test_ci_temporarily_excludes_broken_windows_runtime() -> None:
+def test_ci_runs_the_complete_discovered_matrix() -> None:
     workflow = load_yaml(WORKFLOWS / "ci.yml")
-    assert workflow["jobs"]["verify"]["strategy"]["matrix"]["exclude"] == [
-        {"os": "windows-latest"}
-    ]
+    matrix = workflow["jobs"]["verify"]["strategy"]["matrix"]
+    assert matrix == "${{ fromJSON(needs.discover.outputs.matrix) }}"
 
 
 def test_scorecard_is_deliberately_not_enabled_for_private_repository() -> None:

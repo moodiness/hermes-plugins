@@ -114,7 +114,7 @@ def _restore_file(path: Path, backup: Optional[bytes]) -> None:
     if backup is None:
         path.unlink(missing_ok=True)
     else:
-        atomic_write(path, backup.decode("utf-8"))
+        atomic_write(path, backup)
 
 
 def _persist_and_install(
@@ -202,7 +202,7 @@ def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, 
         if not path.exists():
             repairs.append({"action": "mkdir", "path": str(path), "applied": fix and not dry_run})
             if fix and not dry_run: path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        elif stat.S_IMODE(path.stat().st_mode) != 0o700:
+        elif os.name != "nt" and stat.S_IMODE(path.stat().st_mode) != 0o700:
             repairs.append({"action": "chmod", "path": str(path), "mode": "0700", "applied": fix and not dry_run})
             if fix and not dry_run: os.chmod(path, 0o700)
     if paths.run.exists():

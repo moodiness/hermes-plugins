@@ -43,7 +43,8 @@ def test_state_round_trip_is_atomic_private_and_complete(tmp_path: Path) -> None
     loaded = store.load("demo")
     assert loaded == session
     assert loaded.schema_version == 2
-    assert stat.S_IMODE((store.paths.sessions / "demo.json").stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE((store.paths.sessions / "demo.json").stat().st_mode) == 0o600
     assert not list(store.paths.sessions.glob("*.tmp"))
 
 
