@@ -107,6 +107,13 @@ def test_windows_checkout_preserves_lf_line_endings() -> None:
     assert test_step["env"]["MSYS_NO_PATHCONV"] == "1"
 
 
+def test_ci_temporarily_excludes_broken_windows_runtime() -> None:
+    workflow = load_yaml(WORKFLOWS / "ci.yml")
+    assert workflow["jobs"]["verify"]["strategy"]["matrix"]["exclude"] == [
+        {"os": "windows-latest"}
+    ]
+
+
 def test_scorecard_is_deliberately_not_enabled_for_private_repository() -> None:
     assert not (WORKFLOWS / "scorecard.yml").exists()
     decision = (ROOT / ".github" / "SECURITY_TOOLS.md").read_text()
