@@ -15,6 +15,6 @@ This matrix applies to hermes-omp `0.3.0rc1`.
 
 Subprocess E2E uses a temporary `HERMES_HOME`, fake OMP, fake Hermes delivery, and injected service runners. Exact-Hermes plugin discovery/doctor validation is a separate compatibility check; neither category exercises a real gateway, channel credential, active service, restart, or reboot.
 
-Windows Task Scheduler has no direct equivalent of systemd's unlimited `Restart=always`: `never` omits restart settings, `on-failure` configures three retries, and `always` configures 999 failure retries. A clean exit is not forced to restart by the generated task XML.
+Windows Task Scheduler has no direct equivalent of systemd's unlimited `Restart=always`: `never` omits restart settings, while both `on-failure` and `always` emit `RestartOnFailure` with `Count=999`. Task Scheduler applies that setting only after failures, so a clean exit is not forced to restart by the generated XML. The large native count is not the session's policy budget: hermes-omp's serialized, persistent restart budget is the enforcement authority and exits successfully after refusing a launch so failure-only manager retries stop. XML and injected-runner tests cover this mapping; no native Task Scheduler restart behavior is claimed as validated.
 
 State migrations are forward-only and reject unknown newer schemas. The supported-version policy beyond the verified baselines remains deferred.

@@ -50,7 +50,7 @@ class Runtime:
         self.auth=Authorization(session.platform,session.chat,session.topic,tuple(session.allowed_users))
         self.started_at=time.time() if started_at is None else started_at
         self.usage_rpc_trustworthy=usage_rpc_trustworthy
-        self.transition_max_bytes=max(256, transition_max_bytes)
+        self.transition_max_bytes=max(1, int(transition_max_bytes))
         self.telemetry_enabled=False
         self.notified=set(str(x) for x in state.get("notified",[]))
         self.launch_attempts=[float(x) for x in state.get("launch_attempts",state.get("restarts",[]))]
@@ -131,21 +131,26 @@ class Runtime:
 
     def transition(self, previous: str, current: str, details: dict[str, Any], *, now: Optional[float]=None) -> None:
         path=self.paths.logs/f"{self.session.name}.transitions.ndjson"; path.parent.mkdir(parents=True,exist_ok=True)
-        record={"timestamp":time.time() if now is None else now,"session":self.session.name,"from":previous,"to":current,"reason":str(redact(details.get("reason",current)))[:256],"details":redact(details)}
-        line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
-        if len(line.encode("utf-8")) > self.transition_max_bytes:
-            record["details"]={"truncated":True}
-            record["reason"]=record["reason"][:32]
-            record["truncated"]=True
-            line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
-            if len(line.encode("utf-8")) > self.transition_max_bytes:
-                record["reason"]="truncated"
-                line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
-        existing=path.read_text(encoding="utf-8") if path.exists() else ""
-        combined=(existing+line).encode("utf-8")
-        while len(combined)>self.transition_max_bytes and "\n" in combined.decode("utf-8",errors="ignore"):
-            text=combined.decode("utf-8",errors="ignore"); combined=text.split("\n",1)[1].encode("utf-8")
-        atomic_write(path,combined)
+        def bounded(value: Any) -> str:
+            text=str(redact(value))
+            digest=hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+            return text if len(text.encode("utf-8")) <= 32 else f"sha256:{digest}"
+        record={"timestamp":time.time() if now is None else now,"session":bounded(self.session.name),"from":bounded(previous),"to":bounded(current),"reason":bounded(details.get("reason",current)),"details":redact(details)}
+        def encode(value: dict[str, Any]) -> bytes:
+            return (json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n").encode("utf-8")
+        line=encode(record)
+        if len(line) > self.transition_max_bytes:
+            record={"timestamp":record["timestamp"],"session":record["session"],"from":record["from"],"to":record["to"],"reason":record["reason"],"details":{"truncated":True},"truncated":True}
+            line=encode(record)
+        if len(line) > self.transition_max_bytes:
+            line=encode({"truncated":True})
+        effective_limit=max(self.transition_max_bytes,len(line))
+        existing=path.read_bytes() if path.exists() else b""
+        records=[candidate+b"\n" for candidate in existing.splitlines() if candidate]
+        records.append(line)
+        while len(b"".join(records)) > effective_limit and len(records) > 1:
+            records.pop(0)
+        atomic_write(path,b"".join(records))
 
     def startup_frames(self) -> list[dict[str, Any]]:
         frames=[{"type":"negotiate_protocol","protocolVersion":2,"id":"negotiate"}]

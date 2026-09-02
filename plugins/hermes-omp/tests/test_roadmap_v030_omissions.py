@@ -201,16 +201,38 @@ def test_transition_log_is_bounded_structured_redacted_and_local(tmp_path: Path)
 
 def test_oversized_transition_leaves_one_valid_bounded_redacted_record(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
+    marker = "transition-secret"
     session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission")
     SessionStore(paths).create(session)
+    session.name = f"token={marker}-" + "s" * 40
     runtime = Runtime(session, paths, omp_path="/bin/true", transition_max_bytes=256)
-    runtime.transition("running", "crashed", {"reason": "token=secret", "payload": "x" * 10000})
+    runtime.transition(
+        f"previous-token={marker}-" + "p" * 1000,
+        f"current-token={marker}-" + "c" * 1000,
+        {"reason": f"token={marker}", "payload": "x" * 10000},
+        now=1,
+    )
+    path = paths.logs / f"{session.name}.transitions.ndjson"
+    raw = path.read_bytes()
+    lines = raw.splitlines()
+    assert 0 < len(raw) <= 256
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["truncated"] is True
+    assert marker.encode() not in raw
+    assert all(len(value.encode()) < 256 for value in record.values() if isinstance(value, str))
+
+
+def test_pathological_tiny_transition_limit_still_writes_one_record(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission")
+    SessionStore(paths).create(session)
+    runtime = Runtime(session, paths, omp_path="/bin/true", transition_max_bytes=1)
+    runtime.transition("running", "crashed", {"reason": "token=secret"}, now=1)
     path = paths.logs / "demo.transitions.ndjson"
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert path.stat().st_size <= 256
-    assert len(records) == 1
-    assert records[0]["truncated"] is True
-    assert "secret" not in path.read_text()
+    lines = path.read_bytes().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"truncated": True}
 
 
 def test_dashboard_snapshot_is_bounded_redacted_read_only(tmp_path: Path) -> None:
