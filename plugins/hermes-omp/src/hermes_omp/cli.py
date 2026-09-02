@@ -156,6 +156,17 @@ def _persist_and_install(
 def _owner_live(paths: Paths, name: str) -> bool:
     return owner_lock_live(paths.run / f"{slug(name)}.owner")
 
+_OWNER_STOP_TIMEOUT = 5.0
+
+
+def _wait_owner_stopped(paths: Paths, name: str) -> bool:
+    deadline = time.monotonic() + _OWNER_STOP_TIMEOUT
+    while _owner_live(paths, name):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return True
+
 
 def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, Any]:
     omp = os.environ.get("HERMES_OMP_BINARY") or shutil.which("omp")
@@ -387,42 +398,80 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         backend = backend_for(root=paths.root)
         if initially_live:
             backend.stop(initial.name)
+            if not _wait_owner_stopped(paths, initial.name):
+                try:
+                    backend.start(initial.name)
+                except Exception:
+                    pass
+                raise CliError("session did not stop before update", "conflict", EXIT_CONFLICT)
 
-        with store.transaction():
-            current = _load(store, args.name)
-            if current.id != expected_id:
-                raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
-            if _owner_live(paths, current.name):
-                message = "session became active during update" if not initially_live else "session did not stop before update"
-                raise CliError(message, "conflict", EXIT_CONFLICT)
-            before_apply = Session(**dataclasses.asdict(current))
-            for key, change in changes.items():
-                setattr(current, key, change["to"])
-            errors = validate_session(current)
-            if errors:
-                raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
+        before_apply: Optional[Session] = None
+        service_snapshot = None
+        applied_bytes: Optional[bytes] = None
+        try:
+            with store.transaction():
+                current = _load(store, args.name)
+                if current.id != expected_id:
+                    raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
+                if _owner_live(paths, current.name):
+                    message = "session became active during update" if not initially_live else "session did not stop before update"
+                    raise CliError(message, "conflict", EXIT_CONFLICT)
+                before_apply = Session(**dataclasses.asdict(current))
+                for key, change in changes.items():
+                    setattr(current, key, change["to"])
+                errors = validate_session(current)
+                if errors:
+                    raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
 
-            service_snapshot = backend.snapshot(current.name) if not args.no_install else None
-            session_written = False
-            service_install_attempted = False
+                service_snapshot = backend.snapshot(current.name) if not args.no_install else None
+                session_path = paths.sessions / f"{current.name}.json"
+                session_written = False
+                service_install_attempted = False
+                try:
+                    session_written = True
+                    store.save(current)
+                    applied_bytes = session_path.read_bytes()
+                    if not args.no_install:
+                        service_install_attempted = True
+                        backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
+                except Exception:
+                    if session_written:
+                        store.save(before_apply)
+                    if service_install_attempted and service_snapshot is not None:
+                        try:
+                            backend.restore(current.name, service_snapshot)
+                        except Exception:
+                            pass
+                    raise
+        except Exception:
+            if initially_live:
+                try:
+                    backend.start(initial.name)
+                except Exception:
+                    pass
+            raise
+
+        if initially_live:
             try:
-                session_written = True
-                store.save(current)
-                if not args.no_install:
-                    service_install_attempted = True
-                    backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
+                backend.start(current.name)
             except Exception:
-                if session_written:
-                    store.save(before_apply)
-                if service_install_attempted and service_snapshot is not None:
+                restored = False
+                with store.transaction():
+                    session_path = paths.sessions / f"{current.name}.json"
+                    if before_apply is not None and applied_bytes is not None and session_path.exists() and session_path.read_bytes() == applied_bytes and not _owner_live(paths, current.name):
+                        store.save(before_apply)
+                        if service_snapshot is not None:
+                            try:
+                                backend.restore(current.name, service_snapshot)
+                            except Exception:
+                                pass
+                        restored = True
+                if restored:
                     try:
-                        backend.restore(current.name, service_snapshot)
+                        backend.start(initial.name)
                     except Exception:
                         pass
                 raise
-
-        if initially_live:
-            backend.start(current.name)
         _emit(args, {"updated": current.name, "changes": changes, "restarted": initially_live}, f"Updated {current.name}")
         return EXIT_OK
     if args.command in {"stop", "restart"}:

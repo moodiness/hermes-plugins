@@ -105,3 +105,19 @@ def test_service_restore_re_registers_exact_prior_definition(
         flattened = [part for argv in calls for part in argv]
         for token in expected:
             assert token in flattened
+
+
+@pytest.mark.parametrize("backend_type", [LaunchdBackend, SystemdBackend, WindowsTaskBackend])
+def test_service_snapshot_probe_suppresses_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_type
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 1})()
+
+    backend_type(tmp_path, runner=runner).snapshot("demo")
+
+    assert calls[0][1]["capture_output"] is True

@@ -49,7 +49,7 @@ class LaunchdBackend(ServiceBackend):
         return {"Label": LABEL_PREFIX + slug(name), "ProgramArguments": command, "WorkingDirectory": cwd, "EnvironmentVariables": {"HERMES_HOME": os.environ.get("HERMES_HOME", str(Path.home()/".hermes")), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, "RunAtLoad": False, "KeepAlive": keep, "ProcessType": "Background", "ThrottleInterval": 10, "StandardOutPath": str(self.root / "logs" / f"{slug(name)}.service.log"), "StandardErrorPath": str(self.root / "logs" / f"{slug(name)}.service.log")}
     def definition_path(self, name): return Path.home()/"Library"/"LaunchAgents"/f"{LABEL_PREFIX}{slug(name)}.plist"
     def snapshot(self, name):
-        path=self.definition_path(name); result=self.runner(["launchctl","print",f"gui/{os.getuid()}/{LABEL_PREFIX}{slug(name)}"],check=False)
+        path=self.definition_path(name); result=self.runner(["launchctl","print",f"gui/{os.getuid()}/{LABEL_PREFIX}{slug(name)}"],check=False,capture_output=True)
         return ServiceSnapshot(path,path.read_bytes() if path.exists() else None,getattr(result,"returncode",1)==0)
     def restore(self,name,snapshot):
         self.runner(["launchctl","bootout",f"gui/{os.getuid()}",str(snapshot.path)],check=False)
@@ -74,7 +74,7 @@ class SystemdBackend(ServiceBackend):
         return f"[Unit]\nDescription=Hermes OMP session {slug(name)}\n\n[Service]\nType=simple\nWorkingDirectory={cwd}\nExecStart={shlex.join(command)}\nRestart={restart}\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
     def definition_path(self,name): return Path.home()/".config"/"systemd"/"user"/f"hermes-omp-{slug(name)}.service"
     def snapshot(self,name):
-        path=self.definition_path(name); result=self.runner(["systemctl","--user","is-enabled",f"hermes-omp-{slug(name)}.service"],check=False)
+        path=self.definition_path(name); result=self.runner(["systemctl","--user","is-enabled",f"hermes-omp-{slug(name)}.service"],check=False,capture_output=True)
         return ServiceSnapshot(path,path.read_bytes() if path.exists() else None,getattr(result,"returncode",1)==0)
     def restore(self,name,snapshot):
         unit=f"hermes-omp-{slug(name)}.service"; self.runner(["systemctl","--user","disable","--now",unit],check=False)
@@ -101,7 +101,7 @@ class WindowsTaskBackend(ServiceBackend):
         return f'''<?xml version="1.0" encoding="UTF-16"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>{restart}</Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''
     def definition_path(self,name): return self.root/"services"/f"hermes-omp-{slug(name)}.xml"
     def snapshot(self,name):
-        path=self.definition_path(name); result=self.runner(["schtasks","/Query","/TN",f"HermesOMP-{slug(name)}"],check=False)
+        path=self.definition_path(name); result=self.runner(["schtasks","/Query","/TN",f"HermesOMP-{slug(name)}"],check=False,capture_output=True)
         return ServiceSnapshot(path,path.read_bytes() if path.exists() else None,getattr(result,"returncode",1)==0)
     def restore(self,name,snapshot):
         task=f"HermesOMP-{slug(name)}"; self.runner(["schtasks","/Delete","/TN",task,"/F"],check=False)

@@ -13,6 +13,7 @@ import pytest
 
 import hermes_omp.cli as cli
 from hermes_omp.cli import build_parser, main
+from hermes_omp.service import SystemdBackend
 from hermes_omp.core import Paths, SessionStore
 
 
@@ -402,3 +403,86 @@ def test_orphan_marker_uses_platform_process_identity(monkeypatch) -> None:
 
     monkeypatch.setattr(cli.os, "name", "nt")
     assert _orphan_marker(Child()) == {"orphaned_pid": 123}
+
+
+def test_json_update_suppresses_noisy_service_probe(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    probe_kwargs: list[dict] = []
+
+    def runner(argv, **kwargs):
+        if "is-enabled" in argv:
+            probe_kwargs.append(kwargs)
+            if not kwargs.get("capture_output"):
+                print("noisy probe output")
+        return type("Result", (), {"returncode": 1})()
+
+    backend = SystemdBackend(tmp_path / "omp", runner=runner)
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: backend)
+
+    rc, out = invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--json")
+
+    assert rc == 0
+    assert json.loads(out)["updated"] == "demo"
+    assert probe_kwargs == [{"check": False, "capture_output": True}]
+
+
+def test_active_update_owner_timeout_restarts_prior_service(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    session = SessionStore(paths).load("demo")
+    (paths.run / "demo.owner").write_text(json.dumps({"pid": os.getpid(), "session_id": session.id, "token": "live"}))
+    calls: list[str] = []
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def stop(self, name): calls.append("stop")
+        def start(self, name): calls.append("start")
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+    monkeypatch.setattr(cli, "_OWNER_STOP_TIMEOUT", 0, raising=False)
+
+    rc, out = invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--apply-restart", "--no-install", "--json")
+
+    assert rc == cli.EXIT_CONFLICT
+    assert json.loads(out)["error"]["code"] == "conflict"
+    assert calls == ["stop", "start"]
+    assert SessionStore(paths).load("demo").model == "old"
+
+
+def test_active_update_start_failure_restores_state_service_and_prior_start(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    session = SessionStore(paths).load("demo")
+    owner = paths.run / "demo.owner"
+    owner.write_text(json.dumps({"pid": os.getpid(), "session_id": session.id, "token": "live"}))
+    service_path = tmp_path / "demo.service"
+    service_path.write_bytes(b"old service")
+    starts = 0
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def definition_path(self, name): return service_path
+        def snapshot(self, name): return service_path.read_bytes()
+        def restore(self, name, snapshot): service_path.write_bytes(snapshot)
+        def stop(self, name): owner.unlink(missing_ok=True)
+        def install(self, *args, **kwargs): service_path.write_bytes(b"new service")
+        def start(self, name):
+            nonlocal starts
+            starts += 1
+            if starts == 1: raise RuntimeError("new start failed")
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    with pytest.raises(RuntimeError, match="new start failed"):
+        invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--apply-restart", "--json")
+
+    assert starts == 2
+    assert SessionStore(paths).load("demo").model == "old"
+    assert service_path.read_bytes() == b"old service"
