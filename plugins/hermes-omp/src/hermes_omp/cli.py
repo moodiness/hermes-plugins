@@ -117,8 +117,7 @@ def _persist_and_install(
         }
         written: list[Path] = []
         service_backend = backend_for(root=paths.root) if not no_install else None
-        service_path = service_backend.definition_path(session.name) if service_backend is not None else None
-        service_backup = service_path.read_bytes() if service_path is not None and service_path.exists() else None
+        service_snapshot = service_backend.snapshot(session.name) if service_backend is not None else None
         service_install_attempted = False
         try:
             try:
@@ -146,13 +145,9 @@ def _persist_and_install(
         except Exception:
             for target in reversed(written):
                 _restore_file(target, backups[target])
-            if service_install_attempted and service_backend is not None and service_path is not None:
+            if service_install_attempted and service_backend is not None and service_snapshot is not None:
                 try:
-                    if service_backup is None:
-                        service_backend.remove(session.name)
-                        service_path.unlink(missing_ok=True)
-                    else:
-                        atomic_write(service_path, service_backup)
+                    service_backend.restore(session.name, service_snapshot)
                 except Exception:
                     pass
             raise
@@ -381,62 +376,54 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
             if errors:
                 raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
             definition = _definition(proposed, paths)
-            live = _owner_live(paths, proposed.name)
+            initially_live = _owner_live(paths, proposed.name)
             if args.dry_run:
-                _emit(args, {"dry_run": True, "changes": changes, "service_definition": definition, "active": live})
+                _emit(args, {"dry_run": True, "changes": changes, "service_definition": definition, "active": initially_live})
                 return EXIT_OK
-            if live and not args.apply_restart:
+            if initially_live and not args.apply_restart:
                 raise CliError("active session requires --apply-restart", "conflict", EXIT_CONFLICT)
             expected_id = initial.id
+
         backend = backend_for(root=paths.root)
-        service_path = backend.definition_path(initial.name) if not args.no_install else None
-        service_backup = service_path.read_bytes() if service_path is not None and service_path.exists() else None
-        service_install_attempted = False
-        if live:
+        if initially_live:
             backend.stop(initial.name)
-        before_apply: Optional[Session] = None
-        applied_bytes: Optional[bytes] = None
-        try:
-            with store.transaction():
-                current = _load(store, args.name)
-                if current.id != expected_id:
-                    raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
-                before_apply = Session(**dataclasses.asdict(current))
-                for key, change in changes.items():
-                    setattr(current, key, change["to"])
-                errors = validate_session(current)
-                if errors:
-                    raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
+
+        with store.transaction():
+            current = _load(store, args.name)
+            if current.id != expected_id:
+                raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
+            if _owner_live(paths, current.name):
+                message = "session became active during update" if not initially_live else "session did not stop before update"
+                raise CliError(message, "conflict", EXIT_CONFLICT)
+            before_apply = Session(**dataclasses.asdict(current))
+            for key, change in changes.items():
+                setattr(current, key, change["to"])
+            errors = validate_session(current)
+            if errors:
+                raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
+
+            service_snapshot = backend.snapshot(current.name) if not args.no_install else None
+            session_written = False
+            service_install_attempted = False
+            try:
+                session_written = True
                 store.save(current)
-                session_path = paths.sessions / f"{current.name}.json"
-                applied_bytes = session_path.read_bytes()
-                if not live and not args.no_install:
-                    service_install_attempted = True
-                    backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
-            if live:
                 if not args.no_install:
                     service_install_attempted = True
                     backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
-                backend.start(current.name)
-        except Exception:
-            if before_apply is not None and applied_bytes is not None:
-                with store.transaction():
-                    session_path = paths.sessions / f"{before_apply.name}.json"
-                    if session_path.exists() and session_path.read_bytes() == applied_bytes:
-                        store.save(before_apply)
-            try:
-                if service_install_attempted and service_path is not None:
-                    if service_backup is None:
-                        backend.remove(initial.name)
-                        service_path.unlink(missing_ok=True)
-                    else:
-                        atomic_write(service_path, service_backup)
-                if live:
-                    backend.start(initial.name)
             except Exception:
-                pass
-            raise
-        _emit(args, {"updated": current.name, "changes": changes, "restarted": live}, f"Updated {current.name}")
+                if session_written:
+                    store.save(before_apply)
+                if service_install_attempted and service_snapshot is not None:
+                    try:
+                        backend.restore(current.name, service_snapshot)
+                    except Exception:
+                        pass
+                raise
+
+        if initially_live:
+            backend.start(current.name)
+        _emit(args, {"updated": current.name, "changes": changes, "restarted": initially_live}, f"Updated {current.name}")
         return EXIT_OK
     if args.command in {"stop", "restart"}:
         _load(store, args.name); backend = backend_for(root=paths.root); backend.stop(args.name)

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from hermes_omp.bridge import FileInbox, HermesSendBridge
-from hermes_omp.service import LaunchdBackend, SystemdBackend, WindowsTaskBackend, backend_for
+from hermes_omp.service import LaunchdBackend, ServiceSnapshot, SystemdBackend, WindowsTaskBackend, backend_for
 
 
 def test_hermes_send_uses_stdin_and_no_secret_or_message_in_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,3 +73,35 @@ def test_backends_expose_their_definition_paths(tmp_path: Path, monkeypatch: pyt
     assert WindowsTaskBackend(tmp_path).definition_path("Demo") == (
         tmp_path / "services" / "hermes-omp-demo.xml"
     )
+
+
+def test_service_restore_re_registers_exact_prior_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    for backend_type, expected in [
+        (LaunchdBackend, ("bootout", "bootstrap")),
+        (SystemdBackend, ("disable", "daemon-reload", "enable")),
+        (WindowsTaskBackend, ("/Delete", "/Create")),
+    ]:
+        calls: list[list[str]] = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return type("Result", (), {"returncode": 0})()
+
+        backend = backend_type(tmp_path, runner=runner)
+        path = backend.definition_path("demo")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"opaque prior bytes")
+        snapshot = backend.snapshot("demo")
+        assert snapshot == ServiceSnapshot(path, b"opaque prior bytes", True)
+        path.write_bytes(b"new bytes")
+
+        backend.restore("demo", snapshot)
+
+        assert path.read_bytes() == b"opaque prior bytes"
+        flattened = [part for argv in calls for part in argv]
+        for token in expected:
+            assert token in flattened

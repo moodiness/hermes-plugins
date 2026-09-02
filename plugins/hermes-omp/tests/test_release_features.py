@@ -143,6 +143,9 @@ def test_replace_import_restores_all_tracked_files_on_failure(
 
         def definition(self, *args, **kwargs):
             return {"fake": True}
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot): self.remove(name)
+
 
         def install(self, *args, **kwargs):
             raise RuntimeError("install failed")
@@ -244,6 +247,9 @@ def test_failed_replace_cannot_rollback_over_later_success(
 
         def definition(self, *args, **kwargs):
             return {"fake": True}
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot): self.remove(name)
+
 
         def install(self, *args, **kwargs):
             pass
@@ -309,6 +315,9 @@ def test_replace_service_failure_restores_exact_prior_definition(
 
         def definition(self, *args, **kwargs):
             return {"fake": True}
+        def snapshot(self, name): return service_path.read_bytes()
+        def restore(self, name, snapshot): service_path.write_bytes(snapshot)
+
 
         def install(self, name, command, cwd, restart_policy, activate):
             installs.append(restart_policy)
@@ -346,6 +355,11 @@ def test_replace_service_failure_preserves_prior_absence(
 
         def definition(self, *args, **kwargs):
             return {"fake": True}
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot):
+            self.remove(name)
+            service_path.unlink(missing_ok=True)
+
 
         def install(self, *args, **kwargs):
             service_path.write_bytes(b"partial fresh definition")
@@ -365,6 +379,36 @@ def test_replace_service_failure_preserves_prior_absence(
     assert removed == ["demo"]
     assert not service_path.exists()
 
+
+
+def test_install_success_start_failure_restores_registered_definition(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    archive = tmp_path / "replace.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+    service_path = tmp_path / "demo.service"
+    service_path.write_bytes(b"registered old definition")
+    restored: list[bytes] = []
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def definition_path(self, name): return service_path
+        def snapshot(self, name): return service_path.read_bytes()
+        def install(self, *args, **kwargs): service_path.write_bytes(b"installed new definition")
+        def start(self, name): raise RuntimeError("start failed")
+        def restore(self, name, snapshot):
+            restored.append(snapshot)
+            service_path.write_bytes(snapshot)
+
+    backend = Backend()
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: backend)
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        invoke(tmp_path, capsys, "import", str(archive), "--conflict", "replace", "--start", "--json")
+
+    assert restored == [b"registered old definition"]
+    assert service_path.read_bytes() == b"registered old definition"
 
 def test_update_requires_explicit_restart_for_live_session_and_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
     create(tmp_path, capsys)

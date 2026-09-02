@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -81,11 +82,10 @@ def test_preinstall_write_failure_never_removes_service(
     removed: list[str] = []
 
     class Backend:
-        def definition_path(self, name):
-            return tmp_path / f"{name}.service"
-
-        def remove(self, name):
-            removed.append(name)
+        def definition_path(self, name): return tmp_path / f"{name}.service"
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot): self.remove(name)
+        def remove(self, name): removed.append(name)
 
     monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
     original_atomic_write = cli.atomic_write
@@ -181,6 +181,136 @@ def test_remove_waits_for_replacement_and_does_not_resurrect_state(
     assert not (paths.run / "demo.omp-path").exists()
 
 
+def test_inactive_update_conflicts_if_runtime_owner_appears_before_apply(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    session = SessionStore(paths).load("demo")
+    backend_calls = 0
+    installs: list[str] = []
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def definition_path(self, name): return tmp_path / f"{name}.service"
+        def install(self, *args, **kwargs): installs.append("install")
+
+    def backend_for(**kwargs):
+        nonlocal backend_calls
+        backend_calls += 1
+        if backend_calls == 2:
+            (paths.run / "demo.owner").write_text(json.dumps({"pid": os.getpid(), "session_id": session.id, "token": "live"}))
+        return Backend()
+
+    monkeypatch.setattr(cli, "backend_for", backend_for)
+    rc, out = invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--no-install", "--json")
+
+    assert rc == cli.EXIT_CONFLICT
+    assert json.loads(out)["error"]["code"] == "conflict"
+    assert SessionStore(paths).load("demo").model == "old"
+    assert installs == []
+
+
+def test_inactive_updates_serialize_service_snapshot_and_rollback(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "m", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    service_path = tmp_path / "demo.service"
+    service_path.write_bytes(b"service-old")
+    restore_entered = threading.Event()
+    release_restore = threading.Event()
+    second_install = threading.Event()
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def definition_path(self, name): return service_path
+        def snapshot(self, name): return service_path.read_bytes()
+        def restore(self, name, snapshot): cli.atomic_write(service_path, snapshot)
+        def install(self, name, command, cwd, restart_policy, activate):
+            service_path.write_bytes(f"service-{restart_policy}".encode())
+            if restart_policy == "always": raise RuntimeError("first install failed")
+            second_install.set()
+        def remove(self, name): service_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+    original_atomic_write = cli.atomic_write
+
+    def block_restore(path, data, mode=0o600):
+        if path == service_path and data == b"service-old":
+            restore_entered.set()
+            assert release_restore.wait(2)
+        return original_atomic_write(path, data, mode)
+
+    monkeypatch.setattr(cli, "atomic_write", block_restore)
+    results: list[object] = []
+
+    def update(policy: str) -> None:
+        try: results.append(cli.main(["update", "demo", "--restart-policy", policy, "--json"]))
+        except BaseException as exc: results.append(exc)
+
+    first = threading.Thread(target=update, args=("always",))
+    second = threading.Thread(target=update, args=("never",))
+    first.start(); assert restore_entered.wait(2)
+    second.start(); overlapped = second_install.wait(0.25)
+    release_restore.set(); first.join(2); second.join(2)
+
+    assert not overlapped
+    assert any(isinstance(result, RuntimeError) for result in results) and 0 in results
+    assert service_path.read_bytes() == b"service-never"
+    assert SessionStore(Paths.discover()).load("demo").restart_policy == "never"
+
+
+def test_runtime_start_queued_behind_failed_update_sees_restored_config(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    install_failed = threading.local()
+    apply_released = threading.Event()
+    runtime_loaded = threading.Event()
+    observed_models: list[str] = []
+    original_transaction = SessionStore.transaction
+
+    @contextlib.contextmanager
+    def coordinated_transaction(self):
+        depth = getattr(install_failed, "depth", 0)
+        install_failed.depth = depth + 1
+        try:
+            with original_transaction(self):
+                yield
+        finally:
+            install_failed.depth = depth
+            if depth == 0 and getattr(install_failed, "failed", False):
+                install_failed.failed = False
+                apply_released.set()
+                assert runtime_loaded.wait(2)
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot): pass
+        def definition_path(self, name): return tmp_path / f"{name}.service"
+        def install(self, *args, **kwargs):
+            install_failed.failed = True
+            raise RuntimeError("install failed")
+        def remove(self, name): pass
+
+    monkeypatch.setattr(SessionStore, "transaction", coordinated_transaction)
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    def load_like_runtime() -> None:
+        assert apply_released.wait(2)
+        observed_models.append(SessionStore(paths).load("demo").model)
+        runtime_loaded.set()
+
+    reader = threading.Thread(target=load_like_runtime)
+    reader.start()
+    with pytest.raises(RuntimeError, match="install failed"):
+        invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--json")
+    reader.join(2)
+
+    assert observed_models == ["old"]
+
+
 def test_adopt_uses_explicit_inspection_file_not_process_mutation(tmp_path: Path, capsys) -> None:
     inspection=tmp_path/"inspection.json"; inspection.write_text(json.dumps({"argv":["omp","--resume","sid","--model","m"],"cwd":str(tmp_path)}))
     rc,out=invoke(tmp_path,capsys,"adopt","adopted","--inspection",str(inspection),"--mission","continue","--omp-path","/bin/true","--no-install","--json")
@@ -204,6 +334,8 @@ def test_doctor_is_structured_and_never_reads_secrets(tmp_path: Path, capsys, mo
 def test_create_and_adopt_roll_back_state_when_service_install_fails(tmp_path: Path, capsys, monkeypatch, command: str) -> None:
     class BrokenBackend:
         def definition_path(self, name): return tmp_path / f"{name}.service"
+        def snapshot(self, name): return "absent"
+        def restore(self, name, snapshot): self.remove(name)
         def install(self,*args,**kwargs): raise subprocess.CalledProcessError(1,["install"])
         def remove(self,name): pass
     monkeypatch.setattr(cli,"backend_for",lambda **kwargs: BrokenBackend())
