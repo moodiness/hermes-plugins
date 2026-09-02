@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -104,6 +103,7 @@ def test_launchd_stop_boots_out_and_start_bootstraps_before_kickstart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr("hermes_omp.service.os.getuid", lambda: 501, raising=False)
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def runner(argv, **kwargs):
@@ -112,7 +112,7 @@ def test_launchd_stop_boots_out_and_start_bootstraps_before_kickstart(
 
     backend = LaunchdBackend(tmp_path / "omp", runner=runner)
     definition_path = backend.definition_path("Demo")
-    domain = f"gui/{os.getuid()}"
+    domain = "gui/501"
 
     backend.stop("Demo")
     backend.start("Demo")
@@ -195,6 +195,7 @@ def test_service_restore_re_registers_exact_prior_definition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr("hermes_omp.service.os.getuid", lambda: 501, raising=False)
 
     for backend_type, expected in [
         (LaunchdBackend, ("bootout", "bootstrap")),
@@ -228,6 +229,7 @@ def test_service_snapshot_probe_suppresses_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_type
 ) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr("hermes_omp.service.os.getuid", lambda: 501, raising=False)
     calls = []
 
     def runner(argv, **kwargs):
