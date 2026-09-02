@@ -5,6 +5,7 @@ import importlib.util
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 def load_plugin():
@@ -70,7 +71,7 @@ calls[0]["setup_fn"](parser)
 assert "doctor" in parser.format_help()
 """
     result = subprocess.run(
-        ["/usr/bin/python3", "-I", "-c", script, str(copied)],
+        [sys.executable, "-I", "-c", script, str(copied)],
         cwd=tmp_path,
         text=True,
         capture_output=True,
