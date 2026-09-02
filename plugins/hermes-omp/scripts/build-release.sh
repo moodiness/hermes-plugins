@@ -11,7 +11,7 @@ rm -rf build dist
 "$PYTHON" -m build --no-isolation
 "$PYTHON" - "$SOURCE_DATE_EPOCH" <<'PY'
 from pathlib import Path
-import os, sys, zipfile
+import hashlib, os, sys, zipfile
 
 epoch = max(315532800, int(sys.argv[1]))
 stamp = __import__('time').gmtime(epoch)[:6]
@@ -28,8 +28,22 @@ for wheel in Path('dist').glob('*.whl'):
             info.external_attr = attrs
             target.writestr(info, data)
     os.replace(temporary, wheel)
-PY
-(
-  cd dist
-  shasum -a 256 hermes_omp-* > SHA256SUMS
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as artifact:
+        while chunk := artifact.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+artifacts = sorted(
+    (*Path('dist').glob('*.whl'), *Path('dist').glob('*.tar.gz')),
+    key=lambda path: path.name,
 )
+Path('dist/SHA256SUMS').write_text(
+    ''.join(f'{sha256(path)}  {path.name}\n' for path in artifacts),
+    encoding='utf-8',
+)
+PY

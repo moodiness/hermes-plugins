@@ -18,6 +18,7 @@
 - Delayed inbound and automatic-answer state commits until the OMP RPC line is flushed; added incremental UTF-8 JSONL framing and unparsed EOF handling.
 - Added bounded owned-child/process-group cleanup, durable orphan ownership markers, non-destructive Windows liveness probes, and exact session-id service handoff.
 - Serialized queue and session mutations across cooperating processes, refreshed queue reads from disk, and made create/import/update rollback preserve prior state and service definitions.
+- Replaced removable PID-probed state locks with persistent kernel-held guards, preserving bounded waits and crash recovery without destructive Windows liveness signals; added an offline doctor migration for abandoned legacy lock directories; synchronized the installable and vendored runtimes.
 - Corrected launchd, systemd-user, and Windows Task Scheduler lifecycle commands, path quoting, XML encoding, explicit profile roots, and manager-aware restoration.
 - Excluded virtual environments, caches, build output, distributions, and historical evidence from source archives; removed ignored manifest CLI metadata.
 - Corrected installation to the Hermes 0.21.0 wheel-plus-manual-copy flow, with native plugin id `omp`, distribution name `hermes-omp`, and separate directory/runtime doctor commands.
