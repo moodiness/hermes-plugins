@@ -33,7 +33,7 @@ The destination directory must not already exist; both command blocks enforce th
 
 Session services are user-scoped: launchd on macOS, systemd-user on Linux, and Task Scheduler on Windows. Each generated service passes the selected state directory explicitly as runtime `--root` and the persisted identity as `--expected-session-id`. Only macOS generator/runtime behavior has been locally exercised, without a real active service; Linux and Windows native managers, restart, logout, and reboot behavior have not been validated.
 
-`hermes omp update NAME ...` edits session configuration only. Package/plugin replacement remains a manual lifecycle: stop sessions, disable `omp`, replace the reviewed wheel and plugin directory in the same profile/environment, run the directory doctor, re-enable `omp`, and run the operational doctor. There is no documented managed upgrade command for this installation form.
+`hermes omp update NAME ...` edits session configuration only. Package/plugin replacement remains a manual lifecycle: stop every session, disable `omp`, replace the reviewed wheel and plugin directory in the same profile/environment, run the directory doctor, run `hermes omp doctor --fix --json` once to migrate abandoned pre-upgrade state-lock directories, re-enable `omp`, and run `hermes omp doctor --json`. The migration preserves live or unverifiable owners. There is no documented managed upgrade command for this installation form.
 
 For uninstall, stop and remove each managed session before removing the plugin and distribution:
 
