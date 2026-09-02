@@ -33,10 +33,46 @@ _SECRET_OPTION_FLAG = re.compile(
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCK_DEPTH = threading.local()
+_LOCK_POLL_SECONDS = 0.01
+_LOCK_STALE_SECONDS = 300.0
 
 
 def _normalized_path(path: Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _remove_stale_lock(lock_path: Path) -> None:
+    try:
+        owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+        pid = int(owner["pid"])
+        created_at = float(owner["created_at"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        try:
+            created_at = lock_path.stat().st_mtime
+        except OSError:
+            return
+        pid = 0
+    if _pid_is_alive(pid) or time.time() - created_at <= _LOCK_STALE_SECONDS:
+        return
+    try:
+        (lock_path / "owner.json").unlink(missing_ok=True)
+        lock_path.rmdir()
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager
@@ -58,39 +94,36 @@ def _path_lock(path: Path):
 
             lock_path = path.with_name(path.name + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = lock_path.open("a+b")
-            locked = False
+            token = secrets.token_hex(16)
+            while True:
+                try:
+                    lock_path.mkdir()
+                except FileExistsError:
+                    _remove_stale_lock(lock_path)
+                    time.sleep(_LOCK_POLL_SECONDS)
+                    continue
+                try:
+                    atomic_write(
+                        lock_path / "owner.json",
+                        json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": token}) + "\n",
+                    )
+                except BaseException:
+                    try:
+                        lock_path.rmdir()
+                    except OSError:
+                        pass
+                    raise
+                break
             try:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                handle.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                locked = True
                 yield
             finally:
                 try:
-                    if locked:
-                        handle.seek(0)
-                        if os.name == "nt":
-                            import msvcrt
-
-                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                        else:
-                            import fcntl
-
-                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                finally:
-                    handle.close()
+                    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+                    if owner.get("token") == token:
+                        (lock_path / "owner.json").unlink(missing_ok=True)
+                        lock_path.rmdir()
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pass
         finally:
             if depth:
                 depths[key] = depth
