@@ -64,7 +64,8 @@ jobs:
         run: python -m pytest -q "${{ matrix.path }}/tests"
         env:
           MSYS_NO_PATHCONV: "1"
-      - run: cd "${{ matrix.path }}" && python -m pip install -r requirements-build.txt && SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- .)" sh scripts/build-release.sh
+      - shell: bash
+        run: cd "${{ matrix.path }}" && python -m pip install -r requirements-build.txt && SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- .)" sh scripts/build-release.sh
       - name: Install Hermes plugin validator
         if: matrix.python != '3.10'
         shell: bash

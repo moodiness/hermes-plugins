@@ -377,22 +377,23 @@ def owner_lock_live(lock: Path, owner: Optional[dict[str,Any]]=None) -> bool:
 
 
 def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
-    token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
-    while True:
-        try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-        except FileExistsError:
-            try: current=json.loads(lock.read_text())
-            except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
-            if owner_lock_live(lock,current):
-                if current.get("orphaned_pid") or current.get("orphaned_pgid"):
-                    raise RuntimeError("owner lock protects an orphaned child")
-                raise RuntimeError("session already owned")
-            if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
-            stale=lock.with_name(f"{lock.name}.stale-{token}")
-            try: os.replace(lock,stale)
-            except FileNotFoundError: continue
-            stale.unlink(missing_ok=True); continue
-        os.write(fd,payload.encode()); os.fsync(fd); return fd,token
+    with _path_lock(lock.parent / ".owner-migration"):
+        token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
+        while True:
+            try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            except FileExistsError:
+                try: current=json.loads(lock.read_text())
+                except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
+                if owner_lock_live(lock,current):
+                    if current.get("orphaned_pid") or current.get("orphaned_pgid"):
+                        raise RuntimeError("owner lock protects an orphaned child")
+                    raise RuntimeError("session already owned")
+                if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
+                stale=lock.with_name(f"{lock.name}.stale-{token}")
+                try: os.replace(lock,stale)
+                except FileNotFoundError: continue
+                stale.unlink(missing_ok=True); continue
+            os.write(fd,payload.encode()); os.fsync(fd); return fd,token
 
 
 def release_owner_lock(lock: Path, fd: int, token: str) -> None:

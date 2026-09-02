@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import hermes_omp.cli as cli
+import hermes_omp.runtime as runtime
 import hermes_omp.core as core
 
 from hermes_omp.core import (
@@ -575,6 +576,84 @@ def test_doctor_requires_every_session_stopped_before_legacy_migration(
         assert lock_path.is_dir()
     finally:
         _cleanup_processes([live_owner])
+
+def test_owner_acquisition_uses_doctor_migration_interlock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    paths.ensure()
+    migration_lock = paths.run / ".owner-migration"
+    holder_ready = tmp_path / "migration-holder-ready"
+    release_holder = tmp_path / "release-migration-holder"
+    holder = _spawn_path_lock_worker(
+        migration_lock, holder_ready, release_holder
+    )
+    owner_lock = paths.run / "demo.owner"
+    try:
+        _assert_worker_reached(
+            holder, holder_ready, "migration interlock holder never acquired"
+        )
+        monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0.05)
+
+        def acquire_and_release() -> None:
+            fd, token = runtime.acquire_owner_lock(owner_lock, "session")
+            runtime.release_owner_lock(owner_lock, fd, token)
+
+        with pytest.raises(TimeoutError, match="timed out waiting for lock"):
+            acquire_and_release()
+        assert not owner_lock.exists()
+    finally:
+        release_holder.touch()
+        _cleanup_processes([holder])
+
+    fd, token = runtime.acquire_owner_lock(owner_lock, "session")
+    runtime.release_owner_lock(owner_lock, fd, token)
+
+
+def test_doctor_migration_uses_runtime_startup_interlock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    paths.ensure()
+    lock_path = paths.sessions / ".store.lock"
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": 99999999,
+                "created_at": time.time(),
+                "token": "legacy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    migration_lock = paths.run / ".owner-migration"
+    holder_ready = tmp_path / "migration-holder-ready"
+    release_holder = tmp_path / "release-migration-holder"
+    holder = _spawn_path_lock_worker(
+        migration_lock, holder_ready, release_holder
+    )
+    try:
+        _assert_worker_reached(
+            holder, holder_ready, "runtime startup interlock holder never acquired"
+        )
+        monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0.05)
+        with pytest.raises(TimeoutError, match="timed out waiting for lock"):
+            cli.doctor(paths, fix=True)
+        assert lock_path.is_dir()
+    finally:
+        release_holder.touch()
+        _cleanup_processes([holder])
+
+    report = cli.doctor(paths, fix=True)
+    repair = next(
+        item
+        for item in report["repairs"]
+        if item["action"] == "migrate_legacy_path_lock"
+    )
+    assert repair["applied"] is True
+    assert lock_path.is_file()
+
 
 
 def test_path_lock_times_out_without_disturbing_live_owner(

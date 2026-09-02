@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).parents[1]
 PLUGIN = ROOT / "plugins" / "hermes-omp"
@@ -45,6 +47,17 @@ def test_ci_matrix_starts_at_supported_python() -> None:
     standalone_workflow = (PLUGIN / ".github" / "workflows" / "ci.yml").read_text()
     assert '("3.10", "3.11", "3.13")' in matrix_script
     assert "['3.10', '3.11', '3.13']" in standalone_workflow
+
+
+def test_release_build_uses_bash_on_every_matrix_os() -> None:
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    release_steps = [
+        step
+        for step in workflow["jobs"]["verify"]["steps"]
+        if "scripts/build-release.sh" in step.get("run", "")
+    ]
+    assert len(release_steps) == 1
+    assert release_steps[0].get("shell") == "bash"
 
 
 
