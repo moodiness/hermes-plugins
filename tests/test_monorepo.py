@@ -60,6 +60,14 @@ def test_release_build_uses_bash_on_every_matrix_os() -> None:
     assert release_steps[0].get("shell") == "bash"
 
 
+def test_release_build_checksums_do_not_depend_on_platform_tools() -> None:
+    script = (PLUGIN / "scripts" / "build-release.sh").read_text()
+    assert "hashlib.sha256" in script
+    assert "SHA256SUMS" in script
+    assert "shasum" not in script
+    assert "sha256sum" not in script
+
+
 
 def test_shared_list_script_discovers_nested_plugin_from_any_cwd(tmp_path: Path) -> None:
     result = subprocess.run([str(ROOT / "scripts" / "plugins"), "list"], cwd=tmp_path, text=True, capture_output=True)
