@@ -1,12 +1,14 @@
 name: plugins
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: plugins-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -16,10 +18,27 @@ jobs:
     outputs:
       matrix: ${{ steps.plugins.outputs.matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: plugins
         shell: bash
         run: echo "matrix=$(python scripts/plugin_matrix.py)" >> "$GITHUB_OUTPUT"
+
+  policy:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install policy test dependencies
+        run: python -m pip install --requirement requirements-policy.txt
+      - name: Validate repository policy
+        run: python -m pytest -q tests
 
   verify:
     needs: discover
@@ -29,10 +48,14 @@ jobs:
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.path }}/pyproject.toml
       - run: python -m pip install --upgrade 'pip==25.2'
       - run: python -m pip install -e "${{ matrix.path }}[dev]"
       - run: python -m pytest -q "${{ matrix.path }}/tests"
