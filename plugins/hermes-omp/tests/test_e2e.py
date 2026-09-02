@@ -56,7 +56,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
     paths=Paths.discover()
     try:
         (bridge/"offline").write_text("1")
-        proc=spawn([sys.executable,"-m","hermes_omp.runtime","demo"],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        proc=spawn([sys.executable,"-m","hermes_omp.runtime","demo","--root",str(paths.root)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
             wait_for(lambda:(paths.run/"demo.question.json").exists())
         except AssertionError:
@@ -77,7 +77,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         (bridge/"offline").unlink()
         proc.wait(timeout=10); assert proc.returncode==0
 
-        recovery=spawn([sys.executable,"-m","hermes_omp.runtime","demo"],env=env)
+        recovery=spawn([sys.executable,"-m","hermes_omp.runtime","demo","--root",str(paths.root)],env=env)
         wait_for(lambda:(bridge/"delivered.jsonl").exists())
         stop_process(recovery)
         delivered=[json.loads(x) for x in (bridge/"delivered.jsonl").read_text().splitlines()]
@@ -86,7 +86,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         assert any("answer=Proceed" in line for line in (paths.logs/"demo.jsonl").read_text().splitlines())
 
         store=SessionStore(paths); session=store.load("demo"); session.omp_session_id="resume-session-002"; session.status="crashed"; store.save(session)
-        restarted=spawn([sys.executable,"-m","hermes_omp.runtime","demo"],env=env)
+        restarted=spawn([sys.executable,"-m","hermes_omp.runtime","demo","--root",str(paths.root)],env=env)
         def restarted_with_resume() -> bool:
             try:
                 state=json.loads((tmp_path/"omp-state.json").read_text())
@@ -96,7 +96,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         wait_for(restarted_with_resume)
         stop_process(restarted)
 
-        command=[sys.executable,"-m","hermes_omp.runtime","demo"]
+        command=[sys.executable,"-m","hermes_omp.runtime","demo","--root",str(paths.root),"--expected-session-id",session.id]
         assert LaunchdBackend(paths.root).definition("demo",command,str(project),"on-failure")["KeepAlive"]
         assert "WantedBy=default.target" in SystemdBackend(paths.root).definition("demo",command,str(project),"on-failure")
         assert "LogonTrigger" in WindowsTaskBackend(paths.root).definition("demo",command,str(project),"on-failure")

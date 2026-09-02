@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import hermes_omp.cli as cli
+import hermes_omp.runtime as runtime_module
 from hermes_omp.cli import build_parser, configure_parser, main
 from hermes_omp.service import SystemdBackend
 from hermes_omp.core import Paths, SessionStore
@@ -568,8 +569,9 @@ def test_active_update_holds_identity_reservation_through_start(
     assert store.load("demo").id == replacement.id
 
 
-def test_generated_service_command_pins_session_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generated_service_command_pins_root_and_session_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = cli.Session.new(name="demo", cwd=str(tmp_path), model="m", mission="x")
+    paths = Paths(tmp_path / "profile with spaces" / "omp")
     commands: list[list[str]] = []
 
     class Backend:
@@ -579,12 +581,62 @@ def test_generated_service_command_pins_session_identity(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
 
-    cli._definition(session, Paths(tmp_path / "omp"))
+    cli._definition(session, paths)
 
     assert commands == [[
         sys.executable, "-m", "hermes_omp.runtime", "demo",
+        "--root", str(paths.root),
         "--expected-session-id", session.id,
     ]]
+
+
+def test_runtime_main_passes_explicit_root_and_expected_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "profile with spaces" / "omp"
+    calls: list[tuple[str, Paths, str]] = []
+
+    def fake_run(name: str, *, paths: Paths, expected_session_id: str) -> int:
+        calls.append((name, paths, expected_session_id))
+        return 17
+
+    monkeypatch.setattr(runtime_module, "run", fake_run)
+
+    assert runtime_module.main([
+        "demo", "--root", str(root), "--expected-session-id", "expected-id"
+    ]) == 17
+    assert calls == [("demo", Paths(root), "expected-id")]
+
+
+def test_runtime_bridge_uses_profile_for_explicit_root_and_preserves_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "selected profile" / "omp")
+    session = cli.Session.new(name="demo", cwd=str(tmp_path), model="m", mission="x")
+    SessionStore(paths).save(session)
+    observed: list[dict[str, str]] = []
+
+    class Bridge:
+        def __init__(self, *, hermes: str, environ: dict[str, str]):
+            observed.append(environ)
+
+        def deliver(self, payload):
+            raise AssertionError("no outbound payload expected")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "ambient profile"))
+    monkeypatch.setenv("KEEP_ME", "present")
+    monkeypatch.setattr(runtime_module, "HermesSendBridge", Bridge)
+    monkeypatch.setattr(runtime_module.signal, "signal", lambda *_: None)
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after bridge construction")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after bridge construction"):
+        runtime_module.run("demo", paths=paths)
+
+    assert observed == [{**os.environ, "HERMES_HOME": str(paths.root.parent)}]
 
 
 def test_update_chmod_failure_restores_old_session(

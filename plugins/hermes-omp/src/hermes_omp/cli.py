@@ -83,17 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
     return configure_parser(argparse.ArgumentParser(prog="hermes omp"))
 
 
-def _runtime_command(session: Session) -> list[str]: return [sys.executable, "-m", "hermes_omp.runtime", session.name, "--expected-session-id", session.id]
+def _runtime_command(session: Session, paths: Paths) -> list[str]: return [sys.executable, "-m", "hermes_omp.runtime", session.name, "--root", str(paths.root), "--expected-session-id", session.id]
 
 
 def _definition(session: Session, paths: Paths) -> Any:
-    value = backend_for(root=paths.root).definition(session.name, _runtime_command(session), session.cwd, session.restart_policy)
+    value = backend_for(root=paths.root).definition(session.name, _runtime_command(session, paths), session.cwd, session.restart_policy)
     return value if isinstance(value, dict) else str(value)
 
 
 def _install(session: Session, no_install: bool, start: bool, paths: Paths) -> None:
     if no_install: return
-    backend = backend_for(root=paths.root); backend.install(session.name, _runtime_command(session), session.cwd, session.restart_policy, activate=True)
+    backend = backend_for(root=paths.root); backend.install(session.name, _runtime_command(session, paths), session.cwd, session.restart_policy, activate=True)
     if start: backend.start(session.name)
 
 
@@ -445,7 +445,7 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
                 store.save(current)
                 if not args.no_install:
                     service_install_attempted = True
-                    backend.install(current.name, _runtime_command(current), current.cwd, current.restart_policy, activate=True)
+                    backend.install(current.name, _runtime_command(current, paths), current.cwd, current.restart_policy, activate=True)
                 if initially_live:
                     backend.start(current.name)
             except Exception:

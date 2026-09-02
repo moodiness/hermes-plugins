@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -41,18 +44,131 @@ def test_launchd_definition_has_safe_restart_and_runtime_command(tmp_path: Path)
     assert data["ProgramArguments"][-1] == "demo"
 
 
-def test_systemd_user_unit_generation() -> None:
-    text = SystemdBackend(Path("/tmp")).definition("demo", ["python", "-m", "hermes_omp.runtime", "demo"], "/work", "always")
-    assert "Restart=always" in text and "WorkingDirectory=/work" in text and "ExecStart=python -m hermes_omp.runtime demo" in text
+def test_systemd_user_unit_generation_quotes_literal_values() -> None:
+    command = [
+        '/opt/Python "odd"/bin/python',
+        "-m",
+        "hermes_omp.runtime",
+        "demo",
+        "--root",
+        '/tmp/state 100%/$HOME/"quoted"/omp',
+    ]
+    text = SystemdBackend(Path("/tmp")).definition(
+        "demo", command, '/work/space "quote"/100%', "always"
+    )
+
+    assert 'WorkingDirectory="/work/space \\"quote\\"/100%%"' in text
+    assert (
+        'ExecStart="/opt/Python \\"odd\\"/bin/python" "-m" '
+        '"hermes_omp.runtime" "demo" "--root" '
+        '"/tmp/state 100%%/$$HOME/\\"quoted\\"/omp"'
+    ) in text
+    assert "Restart=always" in text
+
+
+@pytest.mark.parametrize("hostile", ["line\nfeed", "carriage\rreturn", "nul\0byte"])
+def test_systemd_definition_rejects_control_characters(hostile: str) -> None:
+    backend = SystemdBackend(Path("/tmp"))
+
+    with pytest.raises(ValueError, match="CR, LF, or NUL"):
+        backend.definition("demo", ["python", hostile], "/work", "never")
+    with pytest.raises(ValueError, match="CR, LF, or NUL"):
+        backend.definition("demo", ["python"], hostile, "never")
 
 
 @pytest.mark.parametrize(("policy","restart_count"), [("never",None),("on-failure","3"),("always","999")])
 def test_windows_task_xml_generation_honors_restart_policy(policy: str, restart_count: str | None) -> None:
-    text = WindowsTaskBackend(Path("C:/x")).definition("demo", ["python.exe", "-m", "hermes_omp.runtime", "demo"], "C:/Work Area", policy)
-    assert "<Command>python.exe</Command>" in text and "<WorkingDirectory>C:/Work Area</WorkingDirectory>" in text
-    assert "-m hermes_omp.runtime demo" in text
+    command = [
+        'C:\\Program Files\\Python "Special"\\python.exe',
+        "-m",
+        "hermes_omp.runtime",
+        "demo with spaces",
+        "--root",
+        'C:\\State Root\\100% "quoted"\\omp',
+    ]
+    text = WindowsTaskBackend(Path("C:/x")).definition(
+        "demo", command, "C:/Work & Area", policy
+    )
+    root = ET.fromstring(text)
+    namespace = {"task": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+
+    assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+    assert root.findtext(".//task:Command", namespaces=namespace) == command[0]
+    assert root.findtext(".//task:Arguments", namespaces=namespace) == subprocess.list2cmdline(command[1:])
+    assert root.findtext(".//task:WorkingDirectory", namespaces=namespace) == "C:/Work & Area"
     if restart_count is None: assert "<RestartOnFailure>" not in text
     else: assert f"<Count>{restart_count}</Count>" in text
+
+
+def test_launchd_stop_boots_out_and_start_bootstraps_before_kickstart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    backend = LaunchdBackend(tmp_path / "omp", runner=runner)
+    definition_path = backend.definition_path("Demo")
+    domain = f"gui/{os.getuid()}"
+
+    backend.stop("Demo")
+    backend.start("Demo")
+
+    assert calls == [
+        (["launchctl", "bootout", domain, str(definition_path)], {"check": False}),
+        (["launchctl", "bootstrap", domain, str(definition_path)], {"check": False}),
+        (["launchctl", "kickstart", "-k", f"{domain}/ai.hermes.omp.demo"], {"check": True}),
+    ]
+
+
+def test_systemd_install_enables_and_remove_disables_before_deleting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    backend = SystemdBackend(tmp_path / "omp", runner=runner)
+    path = backend.install("Demo", ["python", "-m", "hermes_omp.runtime", "demo"], "/work", "always")
+    assert path.exists()
+    backend.remove("Demo")
+
+    unit = "hermes-omp-demo.service"
+    assert calls == [
+        (["systemctl", "--user", "daemon-reload"], {"check": True}),
+        (["systemctl", "--user", "enable", unit], {"check": True}),
+        (["systemctl", "--user", "disable", "--now", unit], {"check": False}),
+        (["systemctl", "--user", "daemon-reload"], {"check": False}),
+    ]
+    assert not path.exists()
+
+
+def test_windows_install_writes_utf8_and_remove_deletes_definition(tmp_path: Path) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    backend = WindowsTaskBackend(tmp_path / "omp", runner=runner)
+    command = ["python.exe", "-m", "hermes_omp.runtime", "démø"]
+    path = backend.install("Demo", command, "C:/Wörk & Area", "never", activate=False)
+
+    assert path.read_bytes().decode("utf-8") == backend.definition("Demo", command, "C:/Wörk & Area", "never")
+    assert path.read_bytes().startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
+
+    backend.remove("Demo")
+
+    assert calls == [
+        (["schtasks", "/Delete", "/TN", "HermesOMP-demo", "/F"], {"check": False})
+    ]
+    assert not path.exists()
 
 
 def test_backend_selection() -> None:

@@ -366,7 +366,9 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
         stopping=True
 
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
-    outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name); bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"))
+    outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name)
+    bridge_environment=dict(os.environ); bridge_environment["HERMES_HOME"]=str(paths.root.parent)
+    bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"),environ=bridge_environment)
     runtime_path = paths.run / f"{name}.omp-path"
     configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
     runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
@@ -504,6 +506,6 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
                 raise cleanup_error
 
 def main(argv: Optional[list[str]]=None) -> int:
-    p=argparse.ArgumentParser(); p.add_argument("name"); p.add_argument("--expected-session-id",default=""); args=p.parse_args(argv); return run(args.name,expected_session_id=args.expected_session_id)
+    p=argparse.ArgumentParser(); p.add_argument("name"); p.add_argument("--root",required=True); p.add_argument("--expected-session-id",default=""); args=p.parse_args(argv); return run(args.name,paths=Paths(Path(args.root)),expected_session_id=args.expected_session_id)
 
 if __name__=="__main__": raise SystemExit(main())
