@@ -47,6 +47,19 @@ def test_state_round_trip_is_atomic_private_and_complete(tmp_path: Path) -> None
     assert not list(store.paths.sessions.glob("*.tmp"))
 
 
+def test_atomic_write_chmod_failure_preserves_old_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("old")
+    monkeypatch.setattr(core.os, "chmod", lambda *args: (_ for _ in ()).throw(OSError("chmod failed")))
+
+    with pytest.raises(OSError, match="chmod failed"):
+        core.atomic_write(path, "new")
+
+    assert path.read_text() == "old"
+
+
 def test_migrates_v1_and_quarantines_partial_json(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
     store = SessionStore(paths)

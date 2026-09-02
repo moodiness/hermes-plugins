@@ -547,3 +547,26 @@ def test_generated_service_command_pins_session_identity(tmp_path: Path, monkeyp
         sys.executable, "-m", "hermes_omp.runtime", "demo",
         "--expected-session-id", session.id,
     ]]
+
+
+def test_update_chmod_failure_restores_old_session(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    original_chmod = cli.os.chmod
+    failed = False
+
+    def fail_first_session_temp(path, mode):
+        nonlocal failed
+        if Path(path).parent == paths.sessions and Path(path).suffix == ".tmp" and not failed:
+            failed = True
+            raise OSError("chmod before replace failed")
+        return original_chmod(path, mode)
+
+    monkeypatch.setattr(cli.os, "chmod", fail_first_session_temp)
+
+    with pytest.raises(OSError, match="chmod before replace failed"):
+        invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--no-install", "--json")
+
+    assert SessionStore(paths).load("demo").model == "old"

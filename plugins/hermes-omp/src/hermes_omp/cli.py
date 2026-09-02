@@ -411,7 +411,6 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         with store.transaction():
             before_apply: Optional[Session] = None
             service_snapshot = None
-            applied_bytes: Optional[bytes] = None
             session_written = False
             service_install_attempted = False
             try:
@@ -432,14 +431,13 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
                 session_path = paths.sessions / f"{current.name}.json"
                 session_written = True
                 store.save(current)
-                applied_bytes = session_path.read_bytes()
                 if not args.no_install:
                     service_install_attempted = True
                     backend.install(current.name, _runtime_command(current), current.cwd, current.restart_policy, activate=True)
                 if initially_live:
                     backend.start(current.name)
             except Exception:
-                if before_apply is not None and session_written and applied_bytes is not None and session_path.exists() and session_path.read_bytes() == applied_bytes:
+                if before_apply is not None and session_written:
                     store.save(before_apply)
                 if service_install_attempted and service_snapshot is not None:
                     try:
