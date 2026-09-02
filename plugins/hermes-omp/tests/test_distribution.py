@@ -3,14 +3,24 @@ import subprocess
 import sys
 import tarfile
 
+from hermes_omp import __version__
+
 
 def test_publication_docs_and_ci_exist() -> None:
     root=Path(__file__).parents[1]
     required=["README.md","LICENSE","CHANGELOG.md","docs/INSTALL.md","docs/CONFIGURATION.md","docs/CLI.md","docs/MIGRATION.md","docs/TROUBLESHOOTING.md","docs/SECURITY.md","docs/COMPATIBILITY.md","docs/PUBLISHING.md","examples/config.json",".github/workflows/ci.yml"]
     assert all((root/x).is_file() for x in required)
     all_text="\n".join((root/x).read_text() for x in required if not x.endswith("yml"))
-    assert "state.db" in all_text and "hermes send" in all_text and "0.2.0rc1" in all_text
+    assert "state.db" in all_text and "hermes send" in all_text and "0.3.0rc1" in all_text
     assert "TELEGRAM_BOT_TOKEN" not in all_text and "/Users/admin" not in all_text
+
+
+def test_release_version_is_consistent_across_public_surfaces() -> None:
+    root = Path(__file__).parents[1]
+    assert __version__ == "0.3.0rc1"
+    assert 'version = "0.3.0rc1"' in (root / "pyproject.toml").read_text()
+    assert "version: 0.3.0rc1" in (root / "plugin" / "plugin.yaml").read_text()
+    assert "version: 0.3.0rc1" in (root / "skills" / "omp-service" / "SKILL.md").read_text()
 
 
 def test_developer_install_bootstraps_a_pep_660_capable_pip() -> None:
@@ -57,6 +67,7 @@ def test_source_archive_contains_self_contained_plugin(tmp_path: Path) -> None:
     )
     archives=list(tmp_path.glob("hermes_omp-*.tar.gz"))
     assert len(archives)==1
+    assert archives[0].name == "hermes_omp-0.3.0rc1.tar.gz"
     with tarfile.open(archives[0]) as archive:
         names=archive.getnames()
 

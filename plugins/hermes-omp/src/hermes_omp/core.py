@@ -14,12 +14,17 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 SCHEMA_VERSION = 2
-RISKY = re.compile(r"\b(push|publish|release|post|comment|review|merge|deploy|delete|remove|destroy|drop|secret|credential|password|token|permission|payment|purchase|sudo|shell|system command)\b", re.I)
+VALID_POLICY_PROFILES = ("interactive", "balanced", "night", "strict")
+RISKY = re.compile(r"\b(push|publish|release|post|comment|review|merge|deploy|delete|remove|destroy|drop|secret|credentials?|password|token|permissions?|privileged|authoriz(?:e|ation)|payment|purchase|sudo|shell|system command)\b", re.I)
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s&\"']+"),
+    re.compile(r"(?i)(token|password|secret|authorization|api[_-]?key)(\s*[=:]\s*)[^\s&\"']+"),
     re.compile(r"(?i)([?&](?:token|key|secret|password)=)[^&\s]+"),
 ]
+_SECRET_OPTION_FLAG = re.compile(
+    r"^--(?:.*[-_])?(?:password|token|secret|authorization|api[-_]?key)$", re.I
+)
+
 
 
 _PATH_LOCKS: dict[str, threading.RLock] = {}
@@ -118,7 +123,19 @@ def redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: ("[REDACTED]" if re.search(r"token|password|secret|authorization|api[_-]?key", str(key), re.I) else redact(item)) for key, item in value.items()}
     if isinstance(value, list):
-        return [redact(item) for item in value]
+        result = []
+        redact_next = False
+        for item in value:
+            if redact_next and isinstance(item, str):
+                result.append("[REDACTED]")
+            else:
+                result.append(redact(item))
+            redact_next = (
+                isinstance(item, str)
+                and "=" not in item
+                and bool(_SECRET_OPTION_FLAG.fullmatch(item))
+            )
+        return result
     if not isinstance(value, str):
         return value
     result = value
@@ -189,29 +206,42 @@ class Session:
     hermes_version: str
     omp_version: str
     created_at: float
+    policy_profile: str = "interactive"
 
     @classmethod
-    def new(cls, *, name: str, cwd: str, model: str, mission: str, platform: str = "", chat: str = "", topic: str = "", restart_policy: str = "on-failure", omp_session_id: str = "", plugin_version: str = "0.1.0rc1", hermes_version: str = "", omp_version: str = "", project: str = "", omp_options: Optional[list[str]] = None, allowed_users: Optional[list[str]] = None) -> "Session":
+    def new(cls, *, name: str, cwd: str, model: str, mission: str, platform: str = "", chat: str = "", topic: str = "", restart_policy: str = "on-failure", omp_session_id: str = "", plugin_version: str = "0.1.0rc1", hermes_version: str = "", omp_version: str = "", project: str = "", omp_options: Optional[list[str]] = None, allowed_users: Optional[list[str]] = None, policy_profile: str = "interactive") -> "Session":
+        if policy_profile not in VALID_POLICY_PROFILES:
+            raise ValueError("invalid policy_profile")
         name = slug(name)
         now = time.time()
-        return cls(SCHEMA_VERSION, hashlib.sha256(f"{name}\0{now}\0{secrets.token_hex(8)}".encode()).hexdigest()[:24], name, omp_session_id, str(Path(cwd).expanduser().resolve()), project or Path(cwd).name, model, omp_options or [], platform, str(chat), str(topic), [str(x) for x in (allowed_users or [])], mission, "created", now, 0, 0, restart_policy, plugin_version, hermes_version, omp_version, now)
+        return cls(SCHEMA_VERSION, hashlib.sha256(f"{name}\0{now}\0{secrets.token_hex(8)}".encode()).hexdigest()[:24], name, omp_session_id, str(Path(cwd).expanduser().resolve()), project or Path(cwd).name, model, omp_options or [], platform, str(chat), str(topic), [str(x) for x in (allowed_users or [])], mission, "created", now, 0, 0, restart_policy, plugin_version, hermes_version, omp_version, now, policy_profile)
 
 
 class SessionStore:
-    def __init__(self, paths: Paths):
+    def __init__(self, paths: Paths, *, read_only: bool = False):
         self.paths = paths
-        paths.ensure()
+        self.read_only = read_only
+        if not read_only:
+            paths.ensure()
 
     @property
     def _lock_path(self) -> Path:
         return self.paths.sessions / ".store"
 
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise RuntimeError("read-only session store cannot write")
+
     @contextlib.contextmanager
     def transaction(self):
+        if self.read_only:
+            yield
+            return
         with _path_lock(self._lock_path):
             yield
 
     def create(self, session: Session) -> None:
+        self._require_writable()
         path = self.paths.sessions / f"{slug(session.name)}.json"
         with _path_lock(self._lock_path):
             if path.exists():
@@ -220,11 +250,13 @@ class SessionStore:
             self.save(session)
 
     def replace(self, session: Session) -> None:
+        self._require_writable()
         with _path_lock(self._lock_path):
             self.assert_unique_omp_id(session.omp_session_id, except_name=session.name)
             self.save(session)
 
     def patch(self, name: str, expected_id: str, **owned_fields: Any) -> Session:
+        self._require_writable()
         field_names = {field.name for field in dataclasses.fields(Session)}
         invalid = sorted(set(owned_fields) - field_names)
         if invalid:
@@ -241,30 +273,41 @@ class SessionStore:
             return current
 
     def save(self, session: Session) -> None:
+        self._require_writable()
         with self.transaction():
             atomic_write(self.paths.sessions / f"{slug(session.name)}.json", json.dumps(dataclasses.asdict(session), indent=2, sort_keys=True) + "\n")
 
     def load(self, name: str) -> Session:
+        if self.read_only:
+            return self._load_unlocked(name)
         with self.transaction():
-            path = self.paths.sessions / f"{slug(name)}.json"
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                raise
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                target = self.paths.quarantine / f"{path.stem}.{int(time.time_ns())}.json"
-                os.replace(path, target)
-                raise ValueError(f"corrupt state quarantined at {target}") from exc
-            version = int(data.get("schema_version", 1))
-            if version > SCHEMA_VERSION:
-                raise ValueError(f"unsupported schema version {version}")
-            if version == 1:
-                defaults = dataclasses.asdict(Session.new(name=data["name"], cwd=data["cwd"], model=data.get("model", ""), mission=data.get("mission", "")))
-                defaults.update(data)
-                defaults["schema_version"] = SCHEMA_VERSION
-                data = defaults
+            return self._load_unlocked(name)
+
+    def _load_unlocked(self, name: str) -> Session:
+        path = self.paths.sessions / f"{slug(name)}.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            if self.read_only:
+                raise ValueError(f"corrupt session state: {slug(name)}") from exc
+            target = self.paths.quarantine / f"{path.stem}.{int(time.time_ns())}.json"
+            os.replace(path, target)
+            raise ValueError(f"corrupt state quarantined at {target}") from exc
+        version = int(data.get("schema_version", 1))
+        if version > SCHEMA_VERSION:
+            raise ValueError(f"unsupported schema version {version}")
+        if version == 1:
+            defaults = dataclasses.asdict(Session.new(name=data["name"], cwd=data["cwd"], model=data.get("model", ""), mission=data.get("mission", "")))
+            defaults.update(data)
+            defaults["schema_version"] = SCHEMA_VERSION
+            data = defaults
+            data.setdefault("policy_profile", "interactive")
+            if not self.read_only:
                 self.save(Session(**data))
-            return Session(**data)
+        data.setdefault("policy_profile", "interactive")
+        return Session(**data)
 
     def list(self) -> list[Session]:
         result = []
@@ -290,6 +333,7 @@ def validate_session(session: Session) -> list[str]:
     if session.restart_policy not in {"never", "on-failure", "always"}: errors.append("invalid restart_policy")
     if not isinstance(session.omp_options, list) or not all(isinstance(x, str) for x in session.omp_options): errors.append("omp_options must be strings")
     if not isinstance(session.allowed_users, list) or not all(isinstance(x, str) for x in session.allowed_users): errors.append("allowed_users must be strings")
+    if session.policy_profile not in VALID_POLICY_PROFILES: errors.append("invalid policy_profile")
     return errors
 
 

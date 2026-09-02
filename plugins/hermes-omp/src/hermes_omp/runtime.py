@@ -39,7 +39,7 @@ def inspect_adoption(argv: list[str], cwd: str) -> dict[str, str]:
 class Runtime:
     def __init__(self, session: Session, paths: Paths, *, omp_path: str, question_ttl: float = 86400, auto_answer_safe: bool = False):
         self.session, self.paths, self.omp_path = session, paths, omp_path
-        self.store = SessionStore(paths); self.question_ttl=question_ttl; self.auto_answer_safe=auto_answer_safe
+        self.store = SessionStore(paths); self.question_ttl=question_ttl; self.auto_answer_safe=auto_answer_safe or session.policy_profile in {"balanced", "night"}
         state_path=paths.run/f"{session.name}.runtime.json"
         self.state_path=state_path; state=json.loads(state_path.read_text()) if state_path.exists() else {}
         question=state.get("question")

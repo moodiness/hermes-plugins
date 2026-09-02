@@ -33,7 +33,7 @@ def test_plugin_cli_setup_has_all_required_commands() -> None:
     load_plugin().register(Context())
     parser=argparse.ArgumentParser(); calls[0]["setup_fn"](parser)
     help_text = parser.format_help()
-    for command in {"doctor","create","adopt","list","status","send","logs","events","retry","export","import","update","config","completion","stop","restart","remove"}:
+    for command in {"doctor","create","adopt","list","status","send","logs","events","retry","export","import","update","config","completion","stop","restart","remove","migrate-legacy","watch","diagnose","clone"}:
         assert command in help_text
 
 

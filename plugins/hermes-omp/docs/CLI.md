@@ -10,10 +10,15 @@ The native plugin registers `hermes omp`; the wheel also exposes `hermes-omp` wi
 - `logs NAME [--lines N] [--since EPOCH] [--level LEVEL] [--follow] [--poll-interval SECONDS] [--json]`.
 - `events NAME [--queue prompt,outbound,inbound] [--status LIST] [--limit N] [--json]`: inspect heuristically redacted queue data.
 - `retry NAME ID --yes [--json]` or `retry NAME --all --yes [--json]`: requeue dead outbound items only; authorization is not bypassed.
-- `export NAME FILE [--json]`; `import FILE [--conflict fail|rename|replace] [--dry-run] [--no-install] [--start] [--json]`: use the versioned JSON archive format. Archives require operator review and protection; redaction is not a confidentiality guarantee.
+- `export NAME FILE [--hmac-key-file FILE | --hmac-key-env ENV] [--json]`; `import FILE [--conflict fail|rename|replace] [--hmac-key-file FILE | --hmac-key-env ENV] [--require-signature] [--dry-run] [--no-install] [--start] [--json]`: use the versioned JSON archive format. Optional HMAC-SHA256 detects modification but does not encrypt archives; archives still require operator review and protection.
 - `update NAME [--model VALUE] [--mission TEXT] [--platform ID] [--chat ID] [--topic ID] [--allowed-user ID] [--restart-policy ...] [--omp-option OPTION] [--apply-restart] [--dry-run] [--no-install] [--json]`: transactionally change session configuration. Active sessions require `--apply-restart`. This does not upgrade the distribution or native plugin.
 - `stop NAME [--json]`; `restart NAME [--json]`; `remove NAME [--no-service] [--purge-logs] [--json]`. Removal retains logs unless purge is explicit.
 - `config validate NAME [--json]`; `config template [--json]`; `completion bash|zsh|fish [--json]`.
+- `migrate-legacy NAME [--source FILE] [--apply] [--adopt] [--no-install] [--start] [--json]`: map a reviewed legacy JSON record. The default is a non-writing preview; `--apply` permits persistence and `--adopt` separately permits reuse of the recorded OMP resume identity. No process is inspected or stopped.
+- `watch NAME [--poll-interval SECONDS] [--max-polls N] [--json]`: emit the baseline and changed status snapshots. JSON mode is compact NDJSON, one object per line.
+- `diagnose NAME [--output FILE] [--log-lines N] [--event-limit N] [--json]`: produce a bounded, redacted offline report from plugin-owned files. Output files are private.
+- `clone SOURCE DESTINATION [--omp-path PATH] [--no-install] [--start] [--dry-run] [--json]`: copy configuration with fresh local and OMP identities and no runtime, queue, inbox, owner, or log state.
+- `create`, `adopt`, and `update` accept `--policy interactive|balanced|night|strict`; `config template` exposes the default.
 - `inbound NAME --event-id ID --question-id ID --platform PLATFORM --chat CHAT --topic TOPIC --user USER --answer ANSWER [--json]`: queue, but do not yet accept, an inbound answer.
 - `run NAME`: internal foreground supervisor entry point; no `--json`. Generated services instead invoke the runtime module with explicit `--root` and `--expected-session-id` arguments.
 

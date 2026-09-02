@@ -1,7 +1,7 @@
 ---
 name: omp-service
 description: Supervise durable OMP sessions through Hermes safely.
-version: 0.2.0rc1
+version: 0.3.0rc1
 author: hermes-omp contributors, Hermes Agent
 license: MIT
 platforms: [macos]
@@ -40,6 +40,10 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 - `terminal(command="hermes omp events NAME --status dead,rejected --json")`
 - `terminal(command="hermes omp export NAME archive.json --json")`
 - `terminal(command="hermes omp update NAME --model MODEL --dry-run --json")`
+- `terminal(command="hermes omp watch NAME --json")`
+- `terminal(command="hermes omp diagnose NAME --output diagnosis.json --json")`
+- `terminal(command="hermes omp clone NAME COPY --no-install --json")`
+- `terminal(command="hermes omp migrate-legacy NAME --source REVIEWED.json --json")`
 - `terminal(command="hermes omp stop NAME")`
 
 ## Procedure
@@ -50,13 +54,15 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 4. For an OMP question, preserve its correlation ID and route the answer through the configured public inbound adapter.
 5. Stop gracefully and verify the named process is inactive before removal.
 6. Inspect dead letters before running `retry NAME ID --yes`; never retry inbound authorization failures.
-7. Preview create/adopt/import/update/doctor changes with `--dry-run` before service or state changes.
+7. Preview create/adopt/import/update/doctor/migrate-legacy/clone changes before service or state changes. Legacy migration requires `--apply`; retaining its resume identity separately requires `--adopt`.
 
 ## Pitfalls
 
 - Logs are private bounded NDJSON. `remove` retains them; use `--purge-logs` only after confirming the session is inactive and retained evidence is no longer needed. `doctor --fix` refuses a live writer.
 - Never delete ownership locks to bypass a live owner.
 - Never auto-answer publication, review, merge, deployment, secrets, permissions, payment, privileged, or destructive actions.
+- Session archives remain sensitive. HMAC-SHA256 can detect modification but does not encrypt; pass key material only by `--hmac-key-file` or `--hmac-key-env` reference.
+- `balanced` and `night` policies can automatically answer only recommended reversible choices classified safe. Sensitive actions remain explicit under every profile.
 - RC1 validates the runtime on macOS only; Linux and Windows backends are definition-tested.
 
 ## Verification

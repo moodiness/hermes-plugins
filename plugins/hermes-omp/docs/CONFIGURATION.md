@@ -1,8 +1,12 @@
 # Configuration
 
-Session settings are explicit `hermes omp create` flags: cwd/project, model, OMP options, destination platform/chat/topic, allowed users, mission, resume id, executable path, and restart policy. `hermes omp update` changes only its mutable session fields; it is not a package or plugin upgrade.
+Session settings are explicit `hermes omp create` flags: cwd/project, model, OMP options, destination platform/chat/topic, allowed users, mission, resume id, executable path, restart policy, and approval policy. `hermes omp update` changes only its mutable session fields; it is not a package or plugin upgrade.
 
 State lives at `<active-HERMES_HOME>/omp`. Generated services carry that exact directory as the internal runtime's required `--root` argument instead of rediscovering it from a service manager's ambient profile. They also carry `--expected-session-id`; the runtime compares it to the loaded record before acquiring ownership. This is an identity handoff and state-race check, not OS-level process identity proof.
+
+## Approval profiles
+
+`--policy` selects `interactive`, `balanced`, `night`, or `strict`; the default is `interactive`. `balanced` and `night` may answer only an option already classified safe, recommended, and reversible. `interactive` and `strict` never answer automatically. Every profile routes or defers sensitive choices for explicit handling; recognized publication, review, merge, deployment, credential, permission, payment, privileged, and destructive actions remain non-automatic. The production-effective `HERMES_OMP_AUTO_ANSWER_SAFE=1` compatibility override still enables only the same safe classifier.
 
 ## Environment behavior
 

@@ -6,7 +6,7 @@ Independent monorepo for production-shaped Hermes Agent plugins. Every directory
 
 | Plugin | Version | Purpose |
 |---|---:|---|
-| [`hermes-omp`](plugins/hermes-omp) | 0.2.0rc1 | Durable, independent OMP RPC supervision |
+| [`hermes-omp`](plugins/hermes-omp) | 0.3.0rc1 | Durable, independent OMP RPC supervision |
 
 Machine-readable metadata lives in [`plugins.json`](plugins.json).
 

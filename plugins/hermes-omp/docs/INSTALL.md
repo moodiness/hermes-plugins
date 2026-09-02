@@ -6,7 +6,7 @@ From the plugin root in a POSIX shell:
 
 ```sh
 test -n "${HERMES_HOME:-}" || { echo "HERMES_HOME is required" >&2; exit 1; }
-python -m pip install dist/hermes_omp-0.2.0rc1-py3-none-any.whl
+python -m pip install dist/hermes_omp-0.3.0rc1-py3-none-any.whl
 mkdir -p "$HERMES_HOME/plugins"
 test ! -e "$HERMES_HOME/plugins/omp" || { echo "plugin destination already exists" >&2; exit 1; }
 cp -R plugin "$HERMES_HOME/plugins/omp"
@@ -19,7 +19,7 @@ From the plugin root in native Windows PowerShell:
 
 ```powershell
 if (-not $env:HERMES_HOME) { throw "HERMES_HOME is required" }
-python -m pip install dist/hermes_omp-0.2.0rc1-py3-none-any.whl
+python -m pip install dist/hermes_omp-0.3.0rc1-py3-none-any.whl
 $destination = Join-Path $env:HERMES_HOME "plugins/omp"
 if (Test-Path -LiteralPath $destination) { throw "plugin destination already exists" }
 New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null

@@ -1,18 +1,18 @@
 # Migration from omp-service
 
-Do not migrate an active session in place. Record cwd, model, route, mission, and the exact OMP `--resume` id without copying credentials. Produce trusted inspection JSON containing the inspected `argv` and `cwd`; this file is an operator assertion, not OS process-identity proof.
+Legacy migration is file-based and never process-based. Preserve a reviewed JSON record containing cwd, model, mission, route, options, restart policy, executable path, and any known OMP resume id. Do not read credentials into it and do not migrate an active owner in place.
 
-Preview without persisting or installing a service:
+Preview the mapping; this is the default and writes no session or service:
 
 ```sh
-hermes omp adopt NAME --inspection FILE --mission TEXT --platform PLATFORM --chat CHAT --topic TOPIC --allowed-user USER --dry-run --json
+hermes omp migrate-legacy NAME --source REVIEWED.json --no-install --json
 ```
 
-Then stop the legacy supervisor, independently verify that its child has exited, and perform the adoption and user-service start:
+After stopping the legacy supervisor independently and verifying its child exited, persist the new configuration. Add `--adopt` only when the reviewed resume id must be retained:
 
 ```sh
-hermes omp adopt NAME --inspection FILE --mission TEXT --platform PLATFORM --chat CHAT --topic TOPIC --allowed-user USER --start --json
+hermes omp migrate-legacy NAME --source REVIEWED.json --apply --adopt --start --json
 hermes omp status NAME --json
 ```
 
-The generated service carries explicit profile `--root` and `--expected-session-id`; confirm the expected route, resume id, and exactly one heuristic owner before accepting traffic. Keep legacy state read-only until completion. To roll back, run `hermes omp stop NAME`, confirm `active` is false with `hermes omp status NAME --json`, and only then restart the legacy owner.
+For a live process whose arguments were inspected by an operator, the existing `adopt` workflow remains available: produce trusted inspection JSON containing `argv` and `cwd`, preview with `hermes omp adopt NAME --inspection FILE --mission TEXT --dry-run --json`, then stop the source independently before applying. Neither workflow discovers, signals, or terminates the source process.

@@ -14,6 +14,7 @@ def test_catalog_describes_each_discovered_plugin() -> None:
     discovered = sorted(p.name for p in (ROOT / "plugins").iterdir() if (p / "pyproject.toml").is_file())
     assert sorted(item["id"] for item in catalog["plugins"]) == discovered
     item = catalog["plugins"][0]
+    assert item["version"] == "0.3.0rc1"
     assert item["path"] == "plugins/hermes-omp"
     assert item["plugin_path"] == "plugins/hermes-omp/plugin"
     assert "source_repository" not in item

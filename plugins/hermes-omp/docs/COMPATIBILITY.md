@@ -1,5 +1,7 @@
 # Compatibility and versioning
 
+This matrix applies to hermes-omp `0.3.0rc1`.
+
 | Component | Verified or tested scope | Limit |
 |---|---|---|
 | Hermes Agent | 0.21.0, tag `v2026.8.31`, commit `29112bef099274229cadff79cdff7bf7b99c4b77` | Wider Hermes versions are unverified; no broader minimum is claimed |

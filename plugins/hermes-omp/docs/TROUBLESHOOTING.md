@@ -10,5 +10,7 @@ Start with the two distinct checks: run `hermes plugins doctor "$HERMES_HOME/plu
 - Delivery failure: inspect `hermes omp events NAME --queue outbound --status dead --json`; repair the bridge, then explicitly run `hermes omp retry NAME ID --yes --json`.
 - Inbound remains pending: `hermes omp inbound ...` reports queued, not authorized. Check route, sender, question id, expiry, and `hermes omp events NAME --queue inbound --json`.
 - Corrupt state: preserve a private copy and recover from reviewed state or trusted adoption; do not edit live files in place.
+- Signature validation failure: do not bypass it. Confirm the reviewed key reference and archive provenance; any content change invalidates the digest. HMAC authentication does not decrypt or sanitize an archive.
+- Legacy migration unexpectedly wants to write: omit `--apply`; previews are the default. `--adopt` is a separate explicit decision to retain the recorded resume identity.
 
 Linux systemd-user and Windows Task Scheduler behavior is generator-tested only. A generated definition is not evidence that a native service, restart, logout, or reboot path works on that host.

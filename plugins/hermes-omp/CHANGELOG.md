@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0rc1 - 2026-09-02
+
+- Added reviewed legacy-state migration with dry-run-by-default apply/adopt gates, change-only NDJSON session watching, private redacted offline diagnosis, and configuration-only session cloning.
+- Added persisted `interactive`, `balanced`, `night`, and `strict` approval profiles; only safe recommended reversible choices can be answered automatically.
+- Added optional HMAC-SHA256 archive authentication through key-file or environment-variable references and pre-mutation import verification.
 
 - Replaced unavailable macOS `os.waitid` supervision with portable `Popen.poll`/`wait` cleanup while preserving process-group termination and owner-lock safety.
 - Added private bounded structured NDJSON logs with cross-process rotation, retention, record truncation/redaction, delta filtering, rotation-aware reads, doctor remediation, and explicit log purge.

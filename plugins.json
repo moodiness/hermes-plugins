@@ -4,7 +4,7 @@
     {
       "id": "hermes-omp",
       "name": "Hermes OMP",
-      "version": "0.2.0rc1",
+      "version": "0.3.0rc1",
       "description": "Durable OMP RPC supervision for Hermes Agent",
       "path": "plugins/hermes-omp",
       "plugin_path": "plugins/hermes-omp/plugin",
