@@ -142,6 +142,7 @@ class SystemdBackend(ServiceBackend):
 class WindowsTaskBackend(ServiceBackend):
     def definition(self,name,command,cwd,restart_policy):
         command = _service_command(command, self.root, name)
+        command[-1] = command[-1].replace("\\", "/")
         args=subprocess.list2cmdline(command[1:])
         restart="" if restart_policy=="never" else "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>"
         return f'''<?xml version="1.0" encoding="UTF-8"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>{restart}</Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''

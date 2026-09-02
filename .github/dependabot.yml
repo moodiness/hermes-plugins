@@ -23,15 +23,3 @@ updates:
     labels: [dependencies, github-actions]
     commit-message:
       prefix: ci
-
-  - package-ecosystem: github-actions
-    directory: /plugins/hermes-omp
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:30"
-      timezone: Europe/Berlin
-    open-pull-requests-limit: 5
-    labels: [dependencies, github-actions]
-    commit-message:
-      prefix: ci

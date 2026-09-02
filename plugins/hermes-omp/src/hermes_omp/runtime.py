@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .bridge import FileInbox, HermesSendBridge
-from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, atomic_write, classify_safe_answer, parse_rpc_line, redact
+from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, _path_lock, _pid_alive, _windows_pid_alive, atomic_write, classify_safe_answer, parse_rpc_line, redact
 from .logging import StructuredLog
 
 RESTART_BUDGET_EXIT = 0
@@ -85,17 +85,21 @@ class Runtime:
         return {"allowed":not limit_reached and cooldown_remaining<=0,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
 
     def claim_launch(self, now: Optional[float]=None) -> dict[str, Any]:
-        stamp=time.time() if now is None else now
-        window=self.session.restart_window_seconds
-        recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
-        cooldown_remaining=max(0.0,(recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
-        restarts=max(0,len(recent)-1)
-        allowed=(not self.session.max_restarts or restarts < self.session.max_restarts) and cooldown_remaining <= 0
-        status={"allowed":allowed,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
-        if allowed:
-            recent.append(stamp)
-            self.launch_attempts=recent; self.restarts=recent; self._save_state()
-        return status
+        with _path_lock(self.state_path):
+            state=json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+            self.launch_attempts=[float(x) for x in state.get("launch_attempts",state.get("restarts",[]))]
+            self.restarts=self.launch_attempts
+            stamp=time.time() if now is None else now
+            window=self.session.restart_window_seconds
+            recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
+            cooldown_remaining=max(0.0,(recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
+            restarts=max(0,len(recent)-1)
+            allowed=(not self.session.max_restarts or restarts < self.session.max_restarts) and cooldown_remaining <= 0
+            status={"allowed":allowed,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+            if allowed:
+                recent.append(stamp)
+                self.launch_attempts=recent; self.restarts=recent; self._save_state()
+            return status
 
     def record_restart(self, now: Optional[float]=None) -> dict[str, Any]:
         stamp=time.time() if now is None else now
@@ -226,44 +230,6 @@ class RpcLineBuffer:
         return residue
 
 
-def _windows_pid_alive(pid: int, *, kernel32=None, get_last_error=None) -> bool:
-    if pid <= 0:
-        return False
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = kernel32 or ctypes.WinDLL("kernel32", use_last_error=True)
-    get_last_error = get_last_error or ctypes.get_last_error
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-    handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
-    if not handle:
-        return get_last_error() != 87  # ERROR_INVALID_PARAMETER means no such PID.
-    try:
-        result = kernel32.WaitForSingleObject(handle, 0)
-        if result == 0:  # WAIT_OBJECT_0
-            return False
-        if result == 0x102:  # WAIT_TIMEOUT
-            return True
-        return True
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _pid_alive(pid: int) -> bool:
-    if os.name == "nt":
-        # os.kill(pid, 0) calls TerminateProcess on Windows, so use a waitable handle.
-        return _windows_pid_alive(pid)
-    if pid <= 0: return False
-    try: os.kill(pid,0)
-    except ProcessLookupError: return False
-    except PermissionError: return True
-    return True
 
 
 def _process_group_alive(pgid: int) -> bool:
@@ -411,22 +377,23 @@ def owner_lock_live(lock: Path, owner: Optional[dict[str,Any]]=None) -> bool:
 
 
 def acquire_owner_lock(lock: Path, session_id: str) -> tuple[int,str]:
-    token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
-    while True:
-        try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-        except FileExistsError:
-            try: current=json.loads(lock.read_text())
-            except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
-            if owner_lock_live(lock,current):
-                if current.get("orphaned_pid") or current.get("orphaned_pgid"):
-                    raise RuntimeError("owner lock protects an orphaned child")
-                raise RuntimeError("session already owned")
-            if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
-            stale=lock.with_name(f"{lock.name}.stale-{token}")
-            try: os.replace(lock,stale)
-            except FileNotFoundError: continue
-            stale.unlink(missing_ok=True); continue
-        os.write(fd,payload.encode()); os.fsync(fd); return fd,token
+    with _path_lock(lock.parent / ".owner-migration"):
+        token=secrets.token_hex(16); payload=json.dumps({"pid":os.getpid(),"session_id":session_id,"token":token})+"\n"
+        while True:
+            try: fd=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            except FileExistsError:
+                try: current=json.loads(lock.read_text())
+                except (OSError,ValueError): raise RuntimeError(f"session owner lock is unreadable: {lock}")
+                if owner_lock_live(lock,current):
+                    if current.get("orphaned_pid") or current.get("orphaned_pgid"):
+                        raise RuntimeError("owner lock protects an orphaned child")
+                    raise RuntimeError("session already owned")
+                if str(current.get("session_id")) != session_id: raise RuntimeError("owner lock belongs to a different session")
+                stale=lock.with_name(f"{lock.name}.stale-{token}")
+                try: os.replace(lock,stale)
+                except FileNotFoundError: continue
+                stale.unlink(missing_ok=True); continue
+            os.write(fd,payload.encode()); os.fsync(fd); return fd,token
 
 
 def release_owner_lock(lock: Path, fd: int, token: str) -> None:

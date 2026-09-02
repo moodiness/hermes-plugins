@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
 
@@ -263,7 +264,8 @@ def test_diagnose_writes_private_redacted_offline_report(
     assert report["telegram_api_used"] is False
     assert report["events"]["count"] == 1
     assert report["logs"]["count"] == 1
-    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
     assert all(secret not in rendered for secret in ("archive-secret", "bridge-secret", "owner-secret", "report-secret"))
 
 
