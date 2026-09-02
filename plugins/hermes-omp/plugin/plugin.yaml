@@ -3,6 +3,3 @@ version: 0.2.0rc1
 description: "Durable Oh My Pi RPC supervision through Hermes public CLI and messaging interfaces."
 author: hermes-omp contributors
 hooks: []
-provides:
-  cli_commands:
-    - omp

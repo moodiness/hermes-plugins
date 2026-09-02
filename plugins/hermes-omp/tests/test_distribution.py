@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 
 
@@ -46,12 +48,36 @@ def test_monorepo_migration_metadata_is_plugin_relative() -> None:
     assert "/Users/" not in pyproject + workflow
 
 
-def test_source_archive_contains_self_contained_plugin() -> None:
+def test_source_archive_contains_self_contained_plugin(tmp_path: Path) -> None:
     root=Path(__file__).parents[1]
-    archives=sorted((root/"dist").glob("hermes_omp-*.tar.gz"))
-    if not archives:
-        return
-    with tarfile.open(archives[-1]) as archive:
+    subprocess.run(
+        [sys.executable, "-m", "build", "--sdist", "--outdir", str(tmp_path)],
+        check=True,
+        cwd=root,
+    )
+    archives=list(tmp_path.glob("hermes_omp-*.tar.gz"))
+    assert len(archives)==1
+    with tarfile.open(archives[0]) as archive:
         names=archive.getnames()
-    assert any(name.endswith("/plugin/plugin.yaml") for name in names)
-    assert any(name.endswith("/plugin/__init__.py") for name in names)
+
+    forbidden={"__pycache__", ".pytest_cache", "dist", "build", "artifacts"}
+    offending=[
+        name for name in names
+        if any(component.startswith(".venv") or component in forbidden for component in Path(name).parts)
+    ]
+    assert offending==[]
+
+    required=[
+        "/src/hermes_omp/__init__.py",
+        "/plugin/plugin.yaml",
+        "/plugin/__init__.py",
+        "/skills/omp-service/SKILL.md",
+        "/docs/INSTALL.md",
+        "/tests/test_plugin.py",
+        "/examples/config.json",
+        "/README.md",
+        "/CHANGELOG.md",
+        "/LICENSE",
+        "/pyproject.toml",
+    ]
+    assert all(any(name.endswith(suffix) for name in names) for suffix in required)

@@ -35,16 +35,18 @@ def test_plugin_cli_setup_has_all_required_commands() -> None:
         assert command in help_text
 
 
-def test_manifest_and_registration_follow_official_example_shape(caplog) -> None:
-    root=Path(__file__).parents[1]/"plugin"
-    manifest=(root/"plugin.yaml").read_text()
-    assert "name: omp" in manifest and "hooks: []" in manifest
-    assert "provides:\n  cli_commands:\n    - omp" in manifest
-    assert "kind:" not in manifest and "provides_tools:" not in manifest
+def test_registration_declares_authoritative_cli_metadata(caplog) -> None:
     calls=[]
     class Context:
         def register_cli_command(self,**kwargs): calls.append(kwargs)
     with caplog.at_level(logging.DEBUG): load_plugin().register(Context())
+    assert len(calls)==1
+    assert set(calls[0])=={"name", "help", "setup_fn", "handler_fn", "description"}
+    assert calls[0]["name"]=="omp"
+    assert calls[0]["help"]=="Durable Oh My Pi session supervision"
+    assert calls[0]["description"]=="Create and supervise durable OMP RPC sessions."
+    assert callable(calls[0]["setup_fn"])
+    assert callable(calls[0]["handler_fn"])
     assert "registered `hermes omp`" in caplog.text
 
 

@@ -23,6 +23,15 @@ packages = ["src/hermes_omp"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "plugin", "skills", "docs", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+exclude = [
+  "/.venv*",
+  "/**/.venv*",
+  "/**/__pycache__",
+  "/.pytest_cache",
+  "/build",
+  "/dist",
+  "/artifacts",
+]
 
 [tool.hermes-plugins]
 plugin-path = "plugin"
