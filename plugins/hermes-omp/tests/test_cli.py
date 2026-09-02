@@ -45,6 +45,28 @@ def test_configure_parser_populates_supplied_parser_without_changing_prog() -> N
     )
 
 
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("config", "--json", "validate", "missing"),
+        ("config", "validate", "missing", "--json"),
+    ],
+)
+def test_config_validate_preserves_json_at_either_parser_level(
+    tmp_path: Path, capsys, args: tuple[str, ...]
+) -> None:
+    rc, out = invoke(tmp_path, capsys, *args)
+
+    assert rc == cli.EXIT_NOT_FOUND
+    assert json.loads(out) == {
+        "ok": False,
+        "error": {
+            "code": "not_found",
+            "message": "session not found: missing",
+        },
+    }
+
 def test_create_list_status_send_remove_without_activation(tmp_path: Path, capsys) -> None:
     rc, out = invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "m", "--mission", "go", "--platform", "telegram", "--chat", "42", "--topic", "7", "--omp-path", "/bin/true", "--no-install", "--json")
     assert rc == 0 and json.loads(out)["name"] == "demo"

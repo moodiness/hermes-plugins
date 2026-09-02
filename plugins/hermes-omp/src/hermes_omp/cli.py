@@ -41,8 +41,16 @@ def _version(command: list[str]) -> str:
         return "unavailable"
 
 
-def _json(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", action="store_true", help="emit stable machine-readable JSON")
+def _json(
+    parser: argparse.ArgumentParser, *, suppress_default: bool = False
+) -> None:
+    default = argparse.SUPPRESS if suppress_default else False
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=default,
+        help="emit stable machine-readable JSON",
+    )
 
 
 def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -63,7 +71,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     for name in ("stop", "restart"):
         item = sub.add_parser(name); item.add_argument("name"); _json(item)
     remove = sub.add_parser("remove"); remove.add_argument("name"); remove.add_argument("--no-service", action="store_true"); _json(remove)
-    config = sub.add_parser("config"); _json(config); config_sub = config.add_subparsers(dest="config_command", required=True); validate = config_sub.add_parser("validate"); validate.add_argument("name"); _json(validate); template = config_sub.add_parser("template"); _json(template)
+    config = sub.add_parser("config"); _json(config); config_sub = config.add_subparsers(dest="config_command", required=True); validate = config_sub.add_parser("validate"); validate.add_argument("name"); _json(validate, suppress_default=True); template = config_sub.add_parser("template"); _json(template, suppress_default=True)
     completion = sub.add_parser("completion"); completion.add_argument("shell", choices=["bash", "zsh", "fish"]); _json(completion)
     runner = sub.add_parser("run"); runner.add_argument("name")
     inbound = sub.add_parser("inbound"); inbound.add_argument("name"); _json(inbound)

@@ -74,8 +74,18 @@ def test_plugin_dispatch_preserves_zero_and_false_values(monkeypatch) -> None:
     assert received[0].follow is False
 
 
-def test_plugin_registration_uses_only_public_parser_api() -> None:
+def test_plugin_registration_uses_only_public_parser_api(monkeypatch) -> None:
+    import hermes_omp.cli
+
+    def private_template_path() -> None:
+        raise AssertionError("plugin must not build or inspect a template parser")
+
+    monkeypatch.setattr(hermes_omp.cli, "build_parser", private_template_path)
     plugin=load_plugin()
+    calls=[]
+    class Context:
+        def register_cli_command(self,**kwargs): calls.append(kwargs)
+    plugin.register(Context())
 
     class PublicParser:
         def __init__(self) -> None:
@@ -96,7 +106,7 @@ def test_plugin_registration_uses_only_public_parser_api() -> None:
             self.parser.set_defaults(**kwargs)
 
     parser=PublicParser()
-    plugin.register_cli(parser)
+    calls[0]["setup_fn"](parser)
     assert "logs" in parser.parser.format_help()
 
 
