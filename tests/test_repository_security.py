@@ -37,7 +37,7 @@ def test_dependabot_covers_plugin_python_and_all_action_manifests() -> None:
     configured = {(entry["package-ecosystem"], entry["directory"]) for entry in updates}
     assert ("pip", "/plugins/hermes-omp") in configured
     assert ("github-actions", "/") in configured
-    assert ("github-actions", "/plugins/hermes-omp") in configured
+    assert ("github-actions", "/plugins/hermes-omp") not in configured
     for entry in updates:
         assert entry["schedule"]["interval"] == "weekly"
         assert entry["open-pull-requests-limit"] > 0
@@ -61,19 +61,43 @@ def test_codeql_scans_python_and_javascript_without_manual_build() -> None:
     assert matrix["language"] == ["python", "javascript-typescript"]
     assert "build-mode" not in matrix
     assert workflow["jobs"]["analyze"]["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "security-events": "write",
     }
+    assert workflow["on"]["push"]["branches"] == ["main"]
 
 
 def test_dependency_review_is_pull_request_only_and_least_privilege() -> None:
     workflow = load_yaml(WORKFLOWS / "dependency-review.yml")
     assert set(workflow["on"]) == {"pull_request"}
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["jobs"]["dependency-review"]["permissions"] == {
-        "contents": "read",
-        "pull-requests": "write",
-    }
+    assert "permissions" not in workflow["jobs"]["dependency-review"]
+    step = workflow["jobs"]["dependency-review"]["steps"][-1]
+    assert step["with"]["comment-summary-in-pr"] == "never"
+
+
+def test_ci_installs_supported_hermes_before_plugin_doctor() -> None:
+    workflow = load_yaml(WORKFLOWS / "ci.yml")
+    steps = workflow["jobs"]["verify"]["steps"]
+    doctor_index = next(i for i, step in enumerate(steps) if "hermes plugins doctor" in step.get("run", ""))
+    install = steps[doctor_index - 1]
+    assert install["if"] == "matrix.python != '3.10'"
+    assert "https://github.com/NousResearch/hermes-agent.git" in install["run"]
+    assert "30b83ab7b1f194503de9f5545d88c81c4db91e3f" in install["run"]
+    assert "pip install -e" in install["run"]
+    assert steps[doctor_index]["if"] == "matrix.python != '3.10'"
+
+
+def test_ci_audits_policy_dependencies() -> None:
+    workflow = load_yaml(WORKFLOWS / "ci.yml")
+    runs = [step.get("run", "") for step in workflow["jobs"]["policy"]["steps"]]
+    assert any("pip-audit==2.9.0" in run and "pip_audit" in run for run in runs)
+
+
+def test_windows_checkout_preserves_lf_line_endings() -> None:
+    attributes = (ROOT / ".gitattributes").read_text()
+    assert "* text=auto eol=lf" in attributes
 
 
 def test_scorecard_is_deliberately_not_enabled_for_private_repository() -> None:

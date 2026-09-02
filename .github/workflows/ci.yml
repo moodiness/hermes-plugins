@@ -37,6 +37,8 @@ jobs:
           cache: pip
       - name: Install policy test dependencies
         run: python -m pip install --requirement requirements-policy.txt
+      - name: Audit policy dependencies
+        run: python -m pip install 'pip-audit==2.9.0' && python -m pip_audit --requirement requirements-policy.txt
       - name: Validate repository policy
         run: python -m pytest -q tests
 
@@ -60,4 +62,13 @@ jobs:
       - run: python -m pip install -e "${{ matrix.path }}[dev]"
       - run: python -m pytest -q "${{ matrix.path }}/tests"
       - run: cd "${{ matrix.path }}" && python -m pip install -r requirements-build.txt && SOURCE_DATE_EPOCH="$(git log -1 --format=%ct -- .)" sh scripts/build-release.sh
-      - run: hermes plugins doctor "${{ matrix.plugin_path }}" --ci
+      - name: Install Hermes plugin validator
+        if: matrix.python != '3.10'
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
+          git -C "$RUNNER_TEMP/hermes-agent" checkout 30b83ab7b1f194503de9f5545d88c81c4db91e3f
+          python -m pip install -e "$RUNNER_TEMP/hermes-agent"
+      - name: Validate plugin with Hermes
+        if: matrix.python != '3.10'
+        run: hermes plugins doctor "${{ matrix.plugin_path }}" --ci
