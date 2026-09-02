@@ -399,17 +399,22 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         if initially_live:
             backend.stop(initial.name)
             if not _wait_owner_stopped(paths, initial.name):
-                try:
-                    backend.start(initial.name)
-                except Exception:
-                    pass
+                with store.transaction():
+                    try:
+                        current = _load(store, initial.name)
+                        if current.id == expected_id:
+                            backend.start(initial.name)
+                    except Exception:
+                        pass
                 raise CliError("session did not stop before update", "conflict", EXIT_CONFLICT)
 
-        before_apply: Optional[Session] = None
-        service_snapshot = None
-        applied_bytes: Optional[bytes] = None
-        try:
-            with store.transaction():
+        with store.transaction():
+            before_apply: Optional[Session] = None
+            service_snapshot = None
+            applied_bytes: Optional[bytes] = None
+            session_written = False
+            service_install_attempted = False
+            try:
                 current = _load(store, args.name)
                 if current.id != expected_id:
                     raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
@@ -425,50 +430,27 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
 
                 service_snapshot = backend.snapshot(current.name) if not args.no_install else None
                 session_path = paths.sessions / f"{current.name}.json"
-                session_written = False
-                service_install_attempted = False
-                try:
-                    session_written = True
-                    store.save(current)
-                    applied_bytes = session_path.read_bytes()
-                    if not args.no_install:
-                        service_install_attempted = True
-                        backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
-                except Exception:
-                    if session_written:
-                        store.save(before_apply)
-                    if service_install_attempted and service_snapshot is not None:
-                        try:
-                            backend.restore(current.name, service_snapshot)
-                        except Exception:
-                            pass
-                    raise
-        except Exception:
-            if initially_live:
-                try:
-                    backend.start(initial.name)
-                except Exception:
-                    pass
-            raise
-
-        if initially_live:
-            try:
-                backend.start(current.name)
+                session_written = True
+                store.save(current)
+                applied_bytes = session_path.read_bytes()
+                if not args.no_install:
+                    service_install_attempted = True
+                    backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
+                if initially_live:
+                    backend.start(current.name)
             except Exception:
-                restored = False
-                with store.transaction():
-                    session_path = paths.sessions / f"{current.name}.json"
-                    if before_apply is not None and applied_bytes is not None and session_path.exists() and session_path.read_bytes() == applied_bytes and not _owner_live(paths, current.name):
-                        store.save(before_apply)
-                        if service_snapshot is not None:
-                            try:
-                                backend.restore(current.name, service_snapshot)
-                            except Exception:
-                                pass
-                        restored = True
-                if restored:
+                if before_apply is not None and session_written and applied_bytes is not None and session_path.exists() and session_path.read_bytes() == applied_bytes:
+                    store.save(before_apply)
+                if service_install_attempted and service_snapshot is not None:
                     try:
-                        backend.start(initial.name)
+                        backend.restore(current.name, service_snapshot)
+                    except Exception:
+                        pass
+                if initially_live:
+                    try:
+                        latest = _load(store, initial.name)
+                        if latest.id == expected_id and not _owner_live(paths, latest.name):
+                            backend.start(initial.name)
                     except Exception:
                         pass
                 raise

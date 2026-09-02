@@ -486,3 +486,45 @@ def test_active_update_start_failure_restores_state_service_and_prior_start(
     assert starts == 2
     assert SessionStore(paths).load("demo").model == "old"
     assert service_path.read_bytes() == b"old service"
+
+
+def test_active_update_holds_identity_reservation_through_start(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path), "--model", "old", "--mission", "x", "--omp-path", "/bin/true", "--no-install")[0] == 0
+    paths = Paths.discover()
+    store = SessionStore(paths)
+    original = store.load("demo")
+    owner = paths.run / "demo.owner"
+    owner.write_text(json.dumps({"pid": os.getpid(), "session_id": original.id, "token": "live"}))
+    replacement = cli.Session.new(name="demo", cwd=str(tmp_path), model="replacement", mission="y")
+    replace_entered = threading.Event()
+    replace_finished = threading.Event()
+    started_ids: list[str] = []
+    replacer: list[threading.Thread] = []
+
+    def replace() -> None:
+        replace_entered.set()
+        store.replace(replacement)
+        replace_finished.set()
+
+    class Backend:
+        def definition(self, *args, **kwargs): return {"fake": True}
+        def stop(self, name): owner.unlink(missing_ok=True)
+        def start(self, name):
+            worker = threading.Thread(target=replace)
+            replacer.append(worker)
+            worker.start()
+            assert replace_entered.wait(1)
+            assert not replace_finished.wait(0.1)
+            started_ids.append(store.load(name).id)
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    rc, _ = invoke(tmp_path, capsys, "update", "demo", "--model", "new", "--apply-restart", "--no-install", "--json")
+    replacer[0].join(2)
+
+    assert rc == 0
+    assert started_ids == [original.id]
+    assert replace_finished.is_set()
+    assert store.load("demo").id == replacement.id
