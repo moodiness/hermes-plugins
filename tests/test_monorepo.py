@@ -46,11 +46,17 @@ def test_shared_script_uses_an_isolated_plugin_verification_environment() -> Non
     assert "rm -rf dist build" not in script
 
 
+def test_shared_doctor_uses_a_temporary_hermes_home() -> None:
+    script = (ROOT / "scripts" / "plugins").read_text()
+    assert 'doctor_home="$(mktemp -d ' in script
+    assert 'HERMES_HOME="$doctor_home" hermes plugins doctor' in script
+
+
 def test_shared_build_refreshes_and_checks_release_checksums() -> None:
     script = (ROOT / "scripts" / "plugins").read_text()
     assert "SHA256SUMS" in script
-    assert "shasum -a 256 -c" in script
-    assert 'shasum -a 256 "dist/$relative"' in script
+    assert '(cd "$dir/dist" && shasum -a 256 -c "SHA256SUMS")' in script
+    assert '(cd "$dir/dist" && shasum -a 256 "$relative")' in script
 
 
 def test_repository_policy_files_exist() -> None:

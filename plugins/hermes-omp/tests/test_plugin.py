@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 
 def load_plugin():
@@ -33,6 +35,47 @@ def test_plugin_cli_setup_has_all_required_commands() -> None:
     help_text = parser.format_help()
     for command in {"doctor","create","adopt","list","status","send","logs","events","retry","export","import","update","config","completion","stop","restart","remove"}:
         assert command in help_text
+
+
+def test_copied_plugin_is_self_contained_without_installed_distribution(
+    tmp_path: Path,
+) -> None:
+    source = Path(__file__).parents[1] / "plugin"
+    copied = tmp_path / "omp"
+    shutil.copytree(source, copied)
+    assert (copied / "hermes_omp" / "cli.py").is_file()
+    script = """
+import argparse
+import importlib.util
+import sys
+
+plugin_dir = sys.argv[1]
+spec = importlib.util.spec_from_file_location(
+    "isolated_omp_plugin",
+    plugin_dir + "/__init__.py",
+    submodule_search_locations=[plugin_dir],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+calls = []
+class Context:
+    def register_cli_command(self, **kwargs):
+        calls.append(kwargs)
+
+module.register(Context())
+parser = argparse.ArgumentParser()
+calls[0]["setup_fn"](parser)
+assert "doctor" in parser.format_help()
+"""
+    result = subprocess.run(
+        ["/usr/bin/python3", "-I", "-c", script, str(copied)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_registration_declares_authoritative_cli_metadata(caplog) -> None:

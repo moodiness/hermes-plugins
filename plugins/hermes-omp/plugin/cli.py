@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 def _src() -> Path:
     candidates = [
+        Path(__file__).resolve().parent,
         Path(__file__).resolve().parent / "src",
         Path(__file__).resolve().parents[1] / "src",
         Path(__file__).resolve().parents[2] / "src",

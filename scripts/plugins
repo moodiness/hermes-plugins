@@ -38,7 +38,7 @@ refresh_checksums() {
   local dir="$1" sums="$dir/dist/SHA256SUMS" relative
   : > "$sums"
   while IFS= read -r relative; do
-    (cd "$dir" && shasum -a 256 "dist/$relative") >> "$sums"
+    (cd "$dir/dist" && shasum -a 256 "$relative") >> "$sums"
   done < <("$BASE_PYTHON" - "$dir/dist" <<'PY'
 from pathlib import Path
 import sys
@@ -47,11 +47,11 @@ for artifact in sorted((*root.glob("*.whl"), *root.glob("*.tar.gz")), key=lambda
     print(artifact.name)
 PY
 )
-  (cd "$dir" && shasum -a 256 -c "dist/SHA256SUMS")
+  (cd "$dir/dist" && shasum -a 256 -c "SHA256SUMS")
 }
 
 run_for_plugins() {
-  local operation="$1" entry id rel plugin_rel dir python
+  local operation="$1" entry id rel plugin_rel dir python doctor_home
   mapfile_compat
   for entry in "${PLUGINS[@]}"; do
     IFS='|' read -r id rel plugin_rel <<< "$entry"
@@ -67,7 +67,13 @@ run_for_plugins() {
         (cd "$dir" && "$python" -m build)
         refresh_checksums "$dir"
         ;;
-      doctor) hermes plugins doctor "$ROOT/$plugin_rel" --ci ;;
+      doctor)
+        doctor_home="$(mktemp -d "${TMPDIR:-/tmp}/hermes-plugin-doctor.XXXXXX")"
+        trap 'rm -rf "$doctor_home"' RETURN
+        HERMES_HOME="$doctor_home" hermes plugins doctor "$ROOT/$plugin_rel" --ci
+        rm -rf "$doctor_home"
+        trap - RETURN
+        ;;
     esac
   done
 }
