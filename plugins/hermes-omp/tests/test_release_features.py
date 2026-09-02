@@ -453,10 +453,17 @@ def test_doctor_fix_repairs_only_safe_inactive_state(tmp_path: Path, capsys, mon
     (paths.run / "stale.owner").write_text(json.dumps({"pid": 99999999, "session_id": "x", "token": "do-not-report"}))
     rc, out, _ = invoke(tmp_path, capsys, "doctor", "--fix", "--dry-run", "--json")
     report = json.loads(out)
-    assert rc == 0 and report["dry_run"] and any(x["action"] == "chmod" for x in report["repairs"])
-    assert stat.S_IMODE(paths.logs.stat().st_mode) == 0o755 and (paths.run / "stale.owner").exists()
+    assert rc == 0 and report["dry_run"]
+    if os.name != "nt":
+        assert any(x["action"] == "chmod" for x in report["repairs"])
+        assert stat.S_IMODE(paths.logs.stat().st_mode) == 0o755
+    else:
+        assert not any(x["action"] == "chmod" for x in report["repairs"])
+    assert (paths.run / "stale.owner").exists()
     rc, out, _ = invoke(tmp_path, capsys, "doctor", "--fix", "--json")
-    assert rc == 0 and stat.S_IMODE(paths.logs.stat().st_mode) == 0o700 and not (paths.run / "stale.owner").exists()
+    assert rc == 0 and not (paths.run / "stale.owner").exists()
+    if os.name != "nt":
+        assert stat.S_IMODE(paths.logs.stat().st_mode) == 0o700
     assert "do-not-report" not in out
 
 
