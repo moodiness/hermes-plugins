@@ -454,6 +454,26 @@ def test_runtime_startup_and_remove_share_identity_transaction(
     assert not (paths.sessions / "demo.json").exists()
 
 
+
+def test_delayed_service_runtime_rejects_replaced_session_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    store = SessionStore(paths)
+    original = Session.new(name="demo", cwd=str(tmp_path), model="old", mission="x")
+    replacement = Session.new(name="demo", cwd=str(tmp_path), model="replacement", mission="y")
+    store.save(original)
+    store.replace(replacement)
+    spawned: list[object] = []
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", lambda *args, **kwargs: spawned.append(args) or None)
+
+    with pytest.raises(RuntimeError, match="session identity changed"):
+        runtime_module.run("demo", paths=paths, expected_session_id=original.id)
+
+    assert spawned == []
+    assert store.load("demo") == replacement
+    assert not (paths.run / "demo.owner").exists()
+
 def test_commit_response_rejects_a_different_pending_question(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
     session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="x")

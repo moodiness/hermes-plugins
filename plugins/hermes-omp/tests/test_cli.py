@@ -528,3 +528,22 @@ def test_active_update_holds_identity_reservation_through_start(
     assert started_ids == [original.id]
     assert replace_finished.is_set()
     assert store.load("demo").id == replacement.id
+
+
+def test_generated_service_command_pins_session_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = cli.Session.new(name="demo", cwd=str(tmp_path), model="m", mission="x")
+    commands: list[list[str]] = []
+
+    class Backend:
+        def definition(self, name, command, cwd, restart_policy):
+            commands.append(command)
+            return {"fake": True}
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    cli._definition(session, Paths(tmp_path / "omp"))
+
+    assert commands == [[
+        sys.executable, "-m", "hermes_omp.runtime", "demo",
+        "--expected-session-id", session.id,
+    ]]

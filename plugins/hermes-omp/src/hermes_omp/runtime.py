@@ -346,10 +346,12 @@ def _add_exception_note(error: BaseException, note: str) -> None:
         add_note(note)
 
 
-def run(name: str, *, paths: Optional[Paths]=None) -> int:
+def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") -> int:
     paths=paths or Paths.discover(); store=SessionStore(paths)
     with store.transaction():
         session=store.load(name)
+        if expected_session_id and session.id != expected_session_id:
+            raise RuntimeError(f"session identity changed: {session.name}")
         lock=paths.run/f"{session.name}.owner"
         fd,lock_token=acquire_owner_lock(lock,session.id)
     child: Optional[subprocess.Popen[str]]=None
@@ -501,8 +503,7 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             elif termination_error is None:
                 raise cleanup_error
 
-
 def main(argv: Optional[list[str]]=None) -> int:
-    p=argparse.ArgumentParser(); p.add_argument("name"); args=p.parse_args(argv); return run(args.name)
+    p=argparse.ArgumentParser(); p.add_argument("name"); p.add_argument("--expected-session-id",default=""); args=p.parse_args(argv); return run(args.name,expected_session_id=args.expected_session_id)
 
 if __name__=="__main__": raise SystemExit(main())
