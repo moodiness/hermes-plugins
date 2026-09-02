@@ -98,6 +98,13 @@ def test_ci_audits_policy_dependencies() -> None:
 def test_windows_checkout_preserves_lf_line_endings() -> None:
     attributes = (ROOT / ".gitattributes").read_text()
     assert "* text=auto eol=lf" in attributes
+    workflow = load_yaml(WORKFLOWS / "ci.yml")
+    test_step = next(
+        step for step in workflow["jobs"]["verify"]["steps"]
+        if "pytest" in step.get("run", "")
+    )
+    assert "shell" not in test_step
+    assert test_step["env"]["MSYS_NO_PATHCONV"] == "1"
 
 
 def test_scorecard_is_deliberately_not_enabled_for_private_repository() -> None:
