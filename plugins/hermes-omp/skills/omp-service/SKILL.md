@@ -54,6 +54,7 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 
 ## Pitfalls
 
+- Logs are private bounded NDJSON. `remove` retains them; use `--purge-logs` only after confirming the session is inactive and retained evidence is no longer needed. `doctor --fix` refuses a live writer.
 - Never delete ownership locks to bypass a live owner.
 - Never auto-answer publication, review, merge, deployment, secrets, permissions, payment, privileged, or destructive actions.
 - RC1 validates the runtime on macOS only; Linux and Windows backends are definition-tested.

@@ -10,11 +10,13 @@ import signal
 import secrets
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .bridge import FileInbox, HermesSendBridge
 from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, atomic_write, classify_safe_answer, parse_rpc_line, redact
+from .logging import StructuredLog
 
 
 def build_omp_command(session: Session, omp_path: str) -> list[str]:
@@ -171,24 +173,12 @@ def _process_group_alive(pgid: int) -> bool:
 
 
 def _child_exited_unreaped(child: subprocess.Popen[Any]) -> bool:
-    if os.name == "nt":
-        return child.poll() is not None
-    if child.returncode is not None:
-        return True
-    try:
-        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-    except ChildProcessError:
-        return True
-    return result is not None
+    return child.poll() is not None
 
 
 def _wait_for_unreaped_exit(child: subprocess.Popen[Any], deadline: float) -> bool:
     while True:
-        try:
-            result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        except ChildProcessError as exc:
-            raise RuntimeError("supervised child was reaped before process-group cleanup") from exc
-        if result is not None:
+        if child.poll() is not None:
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -223,17 +213,8 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
         return
 
     pgid = child.pid
-    if child.returncode is not None:
-        if _process_group_alive(pgid):
-            raise RuntimeError("supervised child was reaped before its process group disappeared")
-        setattr(child, "_hermes_omp_cleanup_done", True)
-        return
-
-    try:
-        exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-    except ChildProcessError as exc:
-        if _process_group_alive(pgid):
-            raise RuntimeError("supervised child was reaped before process-group cleanup") from exc
+    exited = child.poll() is not None
+    if exited and not _process_group_alive(pgid):
         setattr(child, "_hermes_omp_cleanup_done", True)
         return
 
@@ -373,7 +354,7 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
     configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
     runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
 
-    log_path=paths.logs/f"{session.name}.jsonl"; log_path.parent.mkdir(parents=True,exist_ok=True)
+    log_path=paths.logs/f"{session.name}.jsonl"; event_log=StructuredLog(log_path)
     try:
         outbox=Outbox(paths.outbox/f"{session.name}.json")
         for item in outbox.due():
@@ -401,7 +382,7 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
                     for line in line_buffer.feed(data):
                         try: event=parse_rpc_line(line)
                         except ValueError: event={"type":"unparsed","content":str(redact(line))}
-                        with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
+                        event_log.write(event)
                         action=runtime.on_event(event)
                         if action and action.get("rpc"):
                             try:
@@ -444,7 +425,7 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
             try: content=json.dumps(redact(json.loads(residue)),ensure_ascii=False)
             except (json.JSONDecodeError,TypeError): content=str(redact(residue))
             event={"type":"unparsed","content":content}
-            with log_path.open("a",encoding="utf-8") as log: log.write(json.dumps(redact(event),ensure_ascii=False)+"\n")
+            event_log.write(event)
         for item in outbox.due():
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
@@ -506,6 +487,12 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
                 raise cleanup_error
 
 def main(argv: Optional[list[str]]=None) -> int:
-    p=argparse.ArgumentParser(); p.add_argument("name"); p.add_argument("--root",required=True); p.add_argument("--expected-session-id",default=""); args=p.parse_args(argv); return run(args.name,paths=Paths(Path(args.root)),expected_session_id=args.expected_session_id)
+    p=argparse.ArgumentParser(); p.add_argument("name"); p.add_argument("--root",required=True); p.add_argument("--expected-session-id",default=""); p.add_argument("--service-log", default=""); args=p.parse_args(argv)
+    try:
+        return run(args.name,paths=Paths(Path(args.root)),expected_session_id=args.expected_session_id)
+    except BaseException as exc:
+        if args.service_log:
+            StructuredLog(Path(args.service_log)).write({"type":"error","timestamp":time.time(),"error_type":type(exc).__name__,"message":str(exc),"traceback":traceback.format_exc()})
+        raise
 
 if __name__=="__main__": raise SystemExit(main())

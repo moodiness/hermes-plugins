@@ -244,17 +244,18 @@ def test_terminate_child_signals_group_before_reaping(monkeypatch: pytest.Monkey
         pid = 12345
         returncode = None
 
+        def poll(self):
+            events.append("poll")
+            if killed:
+                self.returncode = -signal.SIGKILL
+            return self.returncode
+
         def wait(self, timeout):
             events.append("wait")
             self.returncode = -signal.SIGKILL
             return self.returncode
 
     child = Child()
-
-    def waitid(*_args):
-        events.append("waitid")
-        return object() if killed else None
-
 
     def killpg(_pgid, sig):
         nonlocal killed
@@ -268,7 +269,6 @@ def test_terminate_child_signals_group_before_reaping(monkeypatch: pytest.Monkey
             events.append("kill")
             killed = True
 
-    monkeypatch.setattr("hermes_omp.runtime.os.waitid", waitid)
     monkeypatch.setattr("hermes_omp.runtime.os.killpg", killpg)
     _terminate_child(child, timeout=0)
     completed_events = list(events)
@@ -328,13 +328,15 @@ def test_terminate_child_gives_live_group_full_term_grace(monkeypatch: pytest.Mo
         pid = 12345
         returncode = None
 
+        def poll(self):
+            if killed_at:
+                self.returncode = -signal.SIGKILL
+            return self.returncode
+
         def wait(self, timeout):
-            self.returncode = 0
-            return 0
+            return self.returncode
 
     child = Child()
-
-    monkeypatch.setattr("hermes_omp.runtime.os.waitid", lambda *_: object())
 
     def killpg(_pgid, sig):
         nonlocal killed_at

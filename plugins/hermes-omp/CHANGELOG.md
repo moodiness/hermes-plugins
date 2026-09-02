@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replaced unavailable macOS `os.waitid` supervision with portable `Popen.poll`/`wait` cleanup while preserving process-group termination and owner-lock safety.
+- Added private bounded structured NDJSON logs with cross-process rotation, retention, record truncation/redaction, delta filtering, rotation-aware reads, doctor remediation, and explicit log purge.
+- Bounded launchd/systemd/Task Scheduler diagnostics and pinned the canonical reproducible release build.
+
 - Delayed inbound and automatic-answer state commits until the OMP RPC line is flushed; added incremental UTF-8 JSONL framing and unparsed EOF handling.
 - Added bounded owned-child/process-group cleanup, durable orphan ownership markers, non-destructive Windows liveness probes, and exact session-id service handoff.
 - Serialized queue and session mutations across cooperating processes, refreshed queue reads from disk, and made create/import/update rollback preserve prior state and service definitions.

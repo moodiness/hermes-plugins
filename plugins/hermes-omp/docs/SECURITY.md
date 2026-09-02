@@ -1,5 +1,7 @@
 # Threat model and security audit
 
+Runtime and service diagnostics use private NDJSON logs. Defaults are 10 MiB per file, five backups, fourteen-day retention, and a 256 KiB maximum record. Writes redact before serialization, truncate at the boundary, exclude stream/tool deltas, rotate under a cross-process lock, and create files with mode 0600. Finite positive internal overrides are available through `HERMES_OMP_LOG_MAX_BYTES`, `HERMES_OMP_LOG_BACKUPS`, `HERMES_OMP_LOG_RETENTION_DAYS`, and `HERMES_OMP_LOG_MAX_RECORD_BYTES`.
+
 Trust boundaries include OMP output, project files, inbound messages, inherited environment variables, archive files, executable paths, and service-manager state. The implementation uses argv lists without shell interpolation, strict slugs, private atomic state files, route/sender/question correlation, replay IDs, question expiry, and FIFO queues. It does not read Hermes `state.db`, import gateway internals, call channel APIs directly, or place outbound message bodies in process arguments.
 
 These controls have limits:

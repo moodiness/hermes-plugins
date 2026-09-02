@@ -17,7 +17,7 @@ def test_developer_install_bootstraps_a_pep_660_capable_pip() -> None:
     root=Path(__file__).parents[1]
     readme=(root/"README.md").read_text()
     workflow=(root/".github/workflows/ci.yml").read_text()
-    upgrade="python -m pip install --upgrade 'pip>=21.3'"
+    upgrade="python -m pip install --upgrade 'pip==25.2'"
     editable="python -m pip install -e '.[dev]'"
     assert upgrade in readme
     assert editable in readme

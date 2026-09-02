@@ -10,4 +10,4 @@ Plugins are versioned and released independently using Semantic Versioning. A mo
 - CI must pass on all declared supported Python/OS combinations before tagging.
 - Breaking manifest, CLI, state, or archive changes require a major version or an explicit prerelease migration path.
 
-Historical import provenance is recorded in `plugins.json`. Subsequent monorepo history is authoritative.
+Historical import provenance is recorded in `plugins.json`: `source_commit` is the final commit from the pre-monorepo source repository at import time, not the current monorepo revision. Subsequent monorepo history is authoritative.

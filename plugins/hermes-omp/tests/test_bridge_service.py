@@ -40,7 +40,9 @@ def test_launchd_definition_has_safe_restart_and_runtime_command(tmp_path: Path)
     data = backend.definition("demo", ["python", "-m", "hermes_omp.runtime", "demo"], str(tmp_path), "on-failure")
     assert data["Label"] == "ai.hermes.omp.demo"
     assert data["KeepAlive"] == {"SuccessfulExit": False}
-    assert data["ProgramArguments"][-1] == "demo"
+    assert data["ProgramArguments"][3] == "demo"
+    assert data["ProgramArguments"][-2:] == ["--service-log", str(tmp_path / "logs" / "demo.service.jsonl")]
+    assert data["StandardOutPath"] == data["StandardErrorPath"] == "/dev/null"
 
 
 def test_systemd_user_unit_generation_quotes_literal_values() -> None:
@@ -93,7 +95,8 @@ def test_windows_task_xml_generation_honors_restart_policy(policy: str, restart_
 
     assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
     assert root.findtext(".//task:Command", namespaces=namespace) == command[0]
-    assert root.findtext(".//task:Arguments", namespaces=namespace) == subprocess.list2cmdline(command[1:])
+    expected = command + ["--service-log", "C:/x/logs/demo.service.jsonl"]
+    assert root.findtext(".//task:Arguments", namespaces=namespace) == subprocess.list2cmdline(expected[1:])
     assert root.findtext(".//task:WorkingDirectory", namespaces=namespace) == "C:/Work & Area"
     if restart_count is None: assert "<RestartOnFailure>" not in text
     else: assert f"<Count>{restart_count}</Count>" in text

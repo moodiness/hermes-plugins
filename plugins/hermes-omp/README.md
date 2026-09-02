@@ -60,10 +60,11 @@ From this plugin directory:
 ```sh
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade 'pip>=21.3'
+python -m pip install --upgrade 'pip==25.2'
 python -m pip install -e '.[dev]'
 pytest -q
-python -m build
+python -m pip install -r requirements-build.txt
+sh scripts/build-release.sh
 ```
 
 Use `.venv\Scripts\activate` on Windows. Relative paths above are plugin-root-relative; use absolute paths when invoking them elsewhere. Files under `artifacts/` are historical transcripts, not fresh proof for the current checkout.

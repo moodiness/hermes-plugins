@@ -14,6 +14,10 @@ from .core import atomic_write, slug
 
 LABEL_PREFIX = "ai.hermes.omp."
 
+
+def _service_command(command: list[str], root: Path, name: str) -> list[str]:
+    return [*command, "--service-log", str(root / "logs" / f"{slug(name)}.service.jsonl")]
+
 @dataclasses.dataclass(frozen=True)
 class ServiceSnapshot:
     path: Path
@@ -73,8 +77,9 @@ def _systemd_quote(value: str, *, environment: bool = False) -> str:
 
 class LaunchdBackend(ServiceBackend):
     def definition(self, name, command, cwd, restart_policy):
+        command = _service_command(command, self.root, name)
         keep: Any = False if restart_policy == "never" else True if restart_policy == "always" else {"SuccessfulExit": False}
-        return {"Label": LABEL_PREFIX + slug(name), "ProgramArguments": command, "WorkingDirectory": cwd, "EnvironmentVariables": {"HERMES_HOME": os.environ.get("HERMES_HOME", str(Path.home()/".hermes")), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, "RunAtLoad": False, "KeepAlive": keep, "ProcessType": "Background", "ThrottleInterval": 10, "StandardOutPath": str(self.root / "logs" / f"{slug(name)}.service.log"), "StandardErrorPath": str(self.root / "logs" / f"{slug(name)}.service.log")}
+        return {"Label": LABEL_PREFIX + slug(name), "ProgramArguments": command, "WorkingDirectory": cwd, "EnvironmentVariables": {"HERMES_HOME": os.environ.get("HERMES_HOME", str(Path.home()/".hermes")), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, "RunAtLoad": False, "KeepAlive": keep, "ProcessType": "Background", "ThrottleInterval": 10, "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null"}
     def definition_path(self, name): return Path.home()/"Library"/"LaunchAgents"/f"{LABEL_PREFIX}{slug(name)}.plist"
     def snapshot(self, name):
         path=self.definition_path(name); result=self.runner(["launchctl","print",f"gui/{os.getuid()}/{LABEL_PREFIX}{slug(name)}"],check=False,capture_output=True)
@@ -102,10 +107,11 @@ class LaunchdBackend(ServiceBackend):
 
 class SystemdBackend(ServiceBackend):
     def definition(self,name,command,cwd,restart_policy):
+        command = _service_command(command, self.root, name)
         restart={"never":"no","on-failure":"on-failure","always":"always"}[restart_policy]
         working_directory=_systemd_quote(cwd)
         arguments=" ".join(_systemd_quote(argument, environment=True) for argument in command)
-        return f"[Unit]\nDescription=Hermes OMP session {slug(name)}\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={arguments}\nRestart={restart}\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
+        return f"[Unit]\nDescription=Hermes OMP session {slug(name)}\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={arguments}\nStandardOutput=null\nStandardError=null\nRestart={restart}\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
     def definition_path(self,name): return Path.home()/".config"/"systemd"/"user"/f"hermes-omp-{slug(name)}.service"
     def snapshot(self,name):
         path=self.definition_path(name); result=self.runner(["systemctl","--user","is-enabled",f"hermes-omp-{slug(name)}.service"],check=False,capture_output=True)
@@ -135,6 +141,7 @@ class SystemdBackend(ServiceBackend):
 
 class WindowsTaskBackend(ServiceBackend):
     def definition(self,name,command,cwd,restart_policy):
+        command = _service_command(command, self.root, name)
         args=subprocess.list2cmdline(command[1:])
         restart="" if restart_policy=="never" else f"<RestartOnFailure><Interval>PT1M</Interval><Count>{'3' if restart_policy=='on-failure' else '999'}</Count></RestartOnFailure>"
         return f'''<?xml version="1.0" encoding="UTF-8"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>{restart}</Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''

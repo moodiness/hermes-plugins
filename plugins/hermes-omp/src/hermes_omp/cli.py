@@ -18,6 +18,7 @@ from .bridge import FileInbox
 from .core import Outbox, Paths, SCHEMA_VERSION, Session, SessionStore, atomic_write, redact, slug, validate_session
 from .runtime import inspect_adoption, owner_lock_live, run
 from .service import backend_for
+from .logging import LogConfig, StructuredLog, iter_log_records, purge_log_family
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -70,7 +71,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     update = sub.add_parser("update"); update.add_argument("name"); update.add_argument("--model"); update.add_argument("--mission"); update.add_argument("--platform"); update.add_argument("--chat"); update.add_argument("--topic"); update.add_argument("--allowed-user", action="append"); update.add_argument("--restart-policy", choices=["never", "on-failure", "always"]); update.add_argument("--omp-option", action="append"); update.add_argument("--apply-restart", action="store_true"); update.add_argument("--dry-run", action="store_true"); update.add_argument("--no-install", action="store_true"); _json(update)
     for name in ("stop", "restart"):
         item = sub.add_parser(name); item.add_argument("name"); _json(item)
-    remove = sub.add_parser("remove"); remove.add_argument("name"); remove.add_argument("--no-service", action="store_true"); _json(remove)
+    remove = sub.add_parser("remove"); remove.add_argument("name"); remove.add_argument("--no-service", action="store_true"); remove.add_argument("--purge-logs", action="store_true"); _json(remove)
     config = sub.add_parser("config"); _json(config); config_sub = config.add_subparsers(dest="config_command", required=True); validate = config_sub.add_parser("validate"); validate.add_argument("name"); _json(validate, suppress_default=True); template = config_sub.add_parser("template"); _json(template, suppress_default=True)
     completion = sub.add_parser("completion"); completion.add_argument("shell", choices=["bash", "zsh", "fish"]); _json(completion)
     runner = sub.add_parser("run"); runner.add_argument("name")
@@ -198,6 +199,18 @@ def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, 
             if not live:
                 repairs.append({"action": "remove_stale_lock", "path": str(lock), "applied": fix and not dry_run})
                 if fix and not dry_run: lock.unlink(missing_ok=True)
+    if paths.logs.exists():
+        config = LogConfig.from_env()
+        for log in paths.logs.glob("*.jsonl"):
+            if log.stat().st_size > config.max_bytes:
+                name = log.name[:-6]
+                live = owner_lock_live(paths.run / f"{name}.owner")
+                repair = {"action": "rotate_oversized_log", "path": str(log), "applied": False}
+                if live:
+                    repair["reason"] = "live_writer"
+                elif fix and not dry_run:
+                    repair["applied"] = StructuredLog(log, config).remediate_oversized()
+                repairs.append(repair)
     probe = paths.root
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -322,10 +335,8 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         _load(store, args.name); path = paths.logs / f"{slug(args.name)}.jsonl"; since = float(args.since) if args.since else 0.0; entries: list[Any] = []; seen = 0; polls = 0
         try:
             while True:
-                lines = path.read_text(errors="replace").splitlines() if path.exists() else []
-                for line in lines[seen:]:
-                    try: value = json.loads(line)
-                    except ValueError: value = {"level": "info", "message": line}
+                lines = list(iter_log_records(path))
+                for value in lines[seen:]:
                     stamp = float(value.get("timestamp", value.get("time", 0)) or 0)
                     if stamp >= since and (not args.level or str(value.get("level", "")).lower() == args.level.lower()): entries.append(redact(value))
                 seen = len(lines)
@@ -484,7 +495,8 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
             for target in [paths.sessions / f"{name}.json", paths.run / f"{name}.omp-path", paths.run / f"{name}.runtime.json", paths.run / f"{name}.question.json"]:
                 target.unlink(missing_ok=True)
             lock.unlink(missing_ok=True)
-        _emit(args, {"removed": name}, f"Removed {name}")
+            purged_logs = purge_log_family(paths.logs / f"{name}.jsonl") if args.purge_logs else 0
+        _emit(args, {"removed": name, "logs_purged": purged_logs, "logs_retained": not args.purge_logs}, f"Removed {name}")
         return EXIT_OK
     if args.command == "inbound":
         session = _load(store, args.name); event = {key: str(getattr(args, key)) for key in ("event_id", "question_id", "platform", "chat", "topic", "user", "answer")}; FileInbox(paths.inbox / session.name).submit(event); _emit(args, {"queued": True, "event_id": args.event_id, "validation": "runtime"}, f"Queued inbound {args.event_id}"); return EXIT_OK

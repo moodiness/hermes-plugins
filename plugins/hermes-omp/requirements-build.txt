@@ -1,0 +1,5 @@
+# Reproducible release build tools. Upgrade only with a reviewed checksum refresh.
+build==1.4.4
+hatchling==1.27.0
+packaging==26.0
+pyproject-hooks==1.2.0
