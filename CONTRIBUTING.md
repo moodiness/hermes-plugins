@@ -8,13 +8,13 @@ Add an entry to `plugins.json`; keep its id equal to the directory name and use 
 
 ## Development
 
-Use strict RED-GREEN-REFACTOR for behavior and path changes. From any directory:
+Use strict RED-GREEN-REFACTOR for behavior and path changes. Run repository-relative commands from the repository root; from elsewhere, invoke the script by absolute path:
 
 ```sh
 /path/to/hermes-plugins/scripts/plugins all
 ```
 
-Before a pull request, verify a clean build from each affected plugin root, run all plugin tests and E2E tests, and run `hermes plugins doctor <plugin-path> --ci`. Never use live profile installation, active OMP sessions, gateway state, or secrets as test fixtures.
+Before a pull request, verify a clean wheel and sdist build from each affected plugin root, run all plugin tests and E2E tests, and run `hermes plugins doctor <source-or-copied-plugin-path> --ci` against the installable plugin directory. Manual hermes-omp installation remains a two-artifact operation: install the wheel into the isolated Python environment that supplies Hermes and copy the plugin directory into the active profile as `omp`. Run directory doctor before enabling trusted code and `hermes omp doctor --json` afterward. Never use live profile installation, active OMP sessions, gateway state, or secrets as test fixtures.
 
 ## Commits
 

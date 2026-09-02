@@ -16,6 +16,7 @@ def test_catalog_describes_each_discovered_plugin() -> None:
     item = catalog["plugins"][0]
     assert item["path"] == "plugins/hermes-omp"
     assert item["plugin_path"] == "plugins/hermes-omp/plugin"
+    assert "source_repository" not in item
     assert item["source_commit"] == "625a7b015d3bd87c6eb4ed2a2e55ed0819a1a61a"
     assert item["autonomous"] is True
 

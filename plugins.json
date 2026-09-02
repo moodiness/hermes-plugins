@@ -12,7 +12,6 @@
       "autonomous": true,
       "license": "MIT",
       "python": ">=3.9",
-      "source_repository": "/Users/admin/Developer/hermes-omp",
       "source_commit": "625a7b015d3bd87c6eb4ed2a2e55ed0819a1a61a",
       "history_preserved": true
     }

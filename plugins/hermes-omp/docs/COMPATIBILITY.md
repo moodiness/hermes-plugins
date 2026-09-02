@@ -1,17 +1,18 @@
 # Compatibility and versioning
 
-| Component | Minimum | RC validation |
-|---|---:|---|
-| Hermes Agent | 0.20.6 | macOS local CLI/plugin doctor |
-| OMP | 18.0.10 | RPC contract via deterministic fake; installed version detected |
-| Python | 3.9 | local 3.9 and CI matrix |
-| pip (editable development install) | 21.3 | PEP 660 support required by Hatchling; bootstrap documented and CI-tested |
-| macOS launchd | macOS 26.6 | generator/runtime locally tested; no real active service touched |
-| Linux systemd-user | modern systemd | generator + CI unit tests only |
-| Windows Task Scheduler | Windows 2022+ | XML generator + CI unit tests only |
+| Component | Verified or tested scope | Limit |
+|---|---|---|
+| Hermes Agent | 0.21.0, tag `v2026.8.31`, commit `29112bef099274229cadff79cdff7bf7b99c4b77` | Wider Hermes versions are unverified; no broader minimum is claimed |
+| Hermes host Python | `>=3.11,<3.14` | This is Hermes's interpreter range |
+| Declared standalone package CI matrix | Python 3.9, 3.11, and 3.13 on Linux, macOS, and Windows | This cross-OS matrix is configured but was not executed by the local validation; Python 3.9 does not make it a supported Hermes host interpreter |
+| OMP | 18.0.10 baseline | RPC behavior is exercised with a deterministic fake; wider native OMP compatibility is unverified |
+| Editable development install | pip 21.3+ | PEP 660 support is required by Hatchling |
+| macOS launchd | Definition and injected-runner tests; local fake-process runtime | No real active service, restart, logout, or reboot test |
+| Linux systemd-user | Definition and injected-runner tests | No native systemd host validation |
+| Windows Task Scheduler | XML and injected-runner tests | No native Task Scheduler host validation |
 
-Windows Task Scheduler has no direct equivalent of systemd's unlimited `Restart=always`: `never` omits restart settings, `on-failure` retries failures three times, and `always` uses Task Scheduler's maximum practical configured retry count (999). Task Scheduler restarts only failures, so a clean exit cannot be forced to restart by task XML alone.
+Subprocess E2E uses a temporary `HERMES_HOME`, fake OMP, fake Hermes delivery, and injected service runners. Exact-Hermes plugin discovery/doctor validation is a separate compatibility check; neither category exercises a real gateway, channel credential, active service, restart, or reboot.
 
-Semantic Versioning is used. State schema migrations are forward-only, atomic, and reject newer unknown versions. RC releases are local artifacts until explicitly approved.
+Windows Task Scheduler has no direct equivalent of systemd's unlimited `Restart=always`: `never` omits restart settings, `on-failure` configures three retries, and `always` configures 999 failure retries. A clean exit is not forced to restart by the generated task XML.
 
-Python 3.9's bundled `venv` may seed pip 21.2.4. Before `pip install -e '.[dev]'`, developers must run `python -m pip install --upgrade 'pip>=21.3'`; wheel installation does not have this editable-install requirement.
+State migrations are forward-only and reject unknown newer schemas. The supported-version policy beyond the verified baselines remains deferred.

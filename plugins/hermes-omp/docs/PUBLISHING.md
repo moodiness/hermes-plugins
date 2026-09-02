@@ -1,3 +1,7 @@
 # Publishing plan
 
-Run the full test/security/doctor/build checks, sign and checksum release artifacts, inspect `git diff` and history, then create a local tag candidate. With explicit owner approval only: create the remote repository, push signed commits/tag, publish artifacts, announce in Hermes `#plugins-skills-and-skins`, and submit the standalone repository for catalog review. No remote action is part of RC1 preparation.
+RC preparation is local only. Fresh release evidence must cover the supported OS/Python package matrix, fake-process subprocess E2E, both distribution artifacts, archive contents/checksums, and exact Hermes 0.21.0 plugin discovery in an isolated temporary profile. Native Linux/Windows manager behavior, real services, gateway traffic, restarts, and reboots are not part of that evidence.
+
+The manual consumer lifecycle remains two-part: install the reviewed `hermes-omp` wheel into the environment that supplies Hermes, and copy the reviewed native `plugin/` directory as plugin id `omp`. The sdist is a source artifact, not a replacement for either installation step. `hermes plugins install ./plugin` is unsupported in Hermes 0.21.0.
+
+Files under `artifacts/` are historical transcripts and must not be presented as fresh evidence for a different checkout or build. Remote repository creation, acquisition policy, signing/attestation, uploads, tag pushes, catalog submission, and announcements remain deferred until explicit owner approval; no such action is part of this release-candidate preparation.

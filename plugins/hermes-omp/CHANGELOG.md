@@ -1,18 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Delayed inbound and automatic-answer state commits until the OMP RPC line is flushed; added incremental UTF-8 JSONL framing and unparsed EOF handling.
+- Added bounded owned-child/process-group cleanup, durable orphan ownership markers, non-destructive Windows liveness probes, and exact session-id service handoff.
+- Serialized queue and session mutations across cooperating processes, refreshed queue reads from disk, and made create/import/update rollback preserve prior state and service definitions.
+- Corrected launchd, systemd-user, and Windows Task Scheduler lifecycle commands, path quoting, XML encoding, explicit profile roots, and manager-aware restoration.
+- Excluded virtual environments, caches, build output, distributions, and historical evidence from source archives; removed ignored manifest CLI metadata.
+- Corrected installation to the Hermes 0.21.0 wheel-plus-manual-copy flow, with native plugin id `omp`, distribution name `hermes-omp`, and separate directory/runtime doctor commands.
+- Documented explicit profile-root and expected-session identity handoff, inherited environment overrides, process cleanup scope, heuristic redaction/liveness checks, and archive confidentiality limits.
+- Narrowed compatibility and validation language to the exact Hermes baseline, fake-process E2E, macOS local scope, and generator-only Linux/Windows coverage.
+
 ## 0.2.0rc1 - 2026-09-01
 
-- Added consistent `--json` output and stable exit-code categories across user commands.
-- Added redacted queue/event inspection, explicit idempotent outbound dead-letter retry, and health/queue/error observability.
-- Added versioned secret-free export/import with conflict policies, schema checks, dry-run, and rollback.
-- Added transactional mutable updates with explicit live restart, plus create/adopt dry-run service previews.
-- Added bounded log following and filters, safe doctor repairs/dry-run, config validation/templates, and standalone shell completion generation.
+- Added JSON output and categorized exit codes for operator commands.
+- Added queue/event inspection with heuristic redaction, explicit outbound dead-letter retry, and health/queue/error reporting.
+- Added versioned export/import with conflict policies, schema checks, dry-run, and rollback; exported content still requires confidential handling.
+- Added transactional session configuration updates with explicit live restart, plus create/adopt previews.
+- Added bounded log following, safe doctor repair previews, config validation/templates, and shell completion generation.
 
 ## 0.1.0rc1 - 2026-09-01
 
-- Standalone public Hermes plugin and complete OMP CLI.
-- Durable schema-v2 sessions, OMP RPC runtime, correlation/authorization, redaction and outbox.
-- launchd backend; tested systemd/Windows definitions.
-- Isolated deterministic E2E suite and publishing documentation.
-- Fixed RC review blockers: durable follow-up RPC drain, restart-safe pending questions and replay protection, stale owner recovery, truthful inbound acknowledgement/rejection, Windows restart-policy generation, transactional create/adopt rollback, and stop-proven removal.
-- Added editable `.[dev]` installation so plain venv `pytest` works without `PYTHONPATH`, including an explicit pip 21.3+ bootstrap for Python 3.9 venvs seeded with pip 21.2.4.
+- Added the standalone native plugin registration, schema-v2 session state, OMP RPC runtime, correlation/authorization, and durable outbox.
+- Added a launchd backend and generated systemd-user/Windows definitions; no native Linux/Windows manager validation was performed.
+- Added isolated subprocess E2E using fake OMP and fake Hermes executables, without real services, gateway traffic, restart, or reboot coverage.
+- Added editable `.[dev]` installation with a pip 21.3+ bootstrap for Python 3.9 development environments.
