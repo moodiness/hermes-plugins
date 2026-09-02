@@ -320,6 +320,90 @@ def test_windows_pid_liveness_probe_does_not_terminate_real_child(tmp_path: Path
 
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group ownership contract")
+def test_terminate_child_does_not_signal_reused_or_unowned_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Child:
+        pid = 12345
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
+    child = Child()
+    signals: list[int] = []
+    monkeypatch.setattr("hermes_omp.runtime.os.getpgid", lambda _pid: 54321)
+    monkeypatch.setattr("hermes_omp.runtime.os.killpg", lambda _pgid, sig: signals.append(sig))
+
+    with pytest.raises(RuntimeError, match="no longer owns its process group"):
+        _terminate_child(child, timeout=0)
+
+    assert signals == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group permission race contract")
+def test_terminate_child_rechecks_ownership_after_killpg_eperm(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Child:
+        pid = 12345
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
+    child = Child()
+    pgids = iter([child.pid, 54321])
+    signals: list[int] = []
+    monkeypatch.setattr("hermes_omp.runtime.os.getpgid", lambda _pid: next(pgids))
+
+    def deny_signal(_pgid, sig):
+        signals.append(sig)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("hermes_omp.runtime.os.killpg", deny_signal)
+
+    with pytest.raises(RuntimeError, match="no longer owns its process group"):
+        _terminate_child(child, timeout=0)
+
+    assert signals == [signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group permission fallback contract")
+def test_terminate_child_falls_back_to_owned_leader_after_killpg_eperm(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Child:
+        pid = 12345
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
+    child = Child()
+    signals: list[tuple[str, int]] = []
+    monkeypatch.setattr("hermes_omp.runtime.os.getpgid", lambda _pid: child.pid)
+
+    def killpg(_pgid, sig):
+        signals.append(("group", sig))
+        raise PermissionError(1, "Operation not permitted")
+
+    def kill(_pid, sig):
+        signals.append(("leader", sig))
+        child.returncode = -sig
+
+    monkeypatch.setattr("hermes_omp.runtime.os.killpg", killpg)
+    monkeypatch.setattr("hermes_omp.runtime.os.kill", kill)
+
+    _terminate_child(child, timeout=0)
+
+    assert signals[:2] == [("group", signal.SIGTERM), ("leader", signal.SIGTERM)]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group grace contract")
 def test_terminate_child_gives_live_group_full_term_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     killed_at = 0.0
@@ -779,6 +863,7 @@ def test_run_preserves_legacy_exception_when_cleanup_initially_fails(tmp_path: P
         retained_state = SessionStore(paths).load("demo")
         lock_payload = json.loads((paths.run / "demo.owner").read_text())
     finally:
+        monkeypatch.setattr("hermes_omp.runtime._terminate_child", production_cleanup)
         _stop_fakes(children)
     assert caught.value is original
     assert attempts == 1

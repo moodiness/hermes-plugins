@@ -318,18 +318,43 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
 
     pgid = child.pid
     exited = child.poll() is not None
+    try:
+        current_pgid = os.getpgid(child.pid)
+    except ProcessLookupError:
+        current_pgid = None
+    except PermissionError as exc:
+        if not exited:
+            raise RuntimeError("could not verify supervised child process group ownership") from exc
+        current_pgid = None
+    if current_pgid is not None and current_pgid != pgid:
+        raise RuntimeError("supervised child no longer owns its process group")
     if exited and not _process_group_alive(pgid):
         setattr(child, "_hermes_omp_cleanup_done", True)
         return
 
+    group_accessible = True
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError as exc:
         if not exited:
             raise RuntimeError("supervised child process group disappeared before termination") from exc
-    except PermissionError:
+    except PermissionError as exc:
         if not exited:
-            raise
+            try:
+                current_pgid = os.getpgid(child.pid)
+            except ProcessLookupError:
+                current_pgid = None
+            except PermissionError:
+                raise exc
+            if current_pgid is not None and current_pgid != pgid:
+                raise RuntimeError("supervised child no longer owns its process group") from exc
+            try:
+                os.kill(child.pid, signal.SIGTERM)
+                group_accessible = False
+            except ProcessLookupError:
+                exited = child.poll() is not None
+            except PermissionError:
+                raise exc
 
     term_deadline = time.monotonic() + timeout
     while time.monotonic() < term_deadline and (not exited or _process_group_alive(pgid)):
@@ -338,7 +363,7 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
         else:
             _wait_for_group_exit(pgid, term_deadline)
 
-    if _process_group_alive(pgid):
+    if group_accessible and _process_group_alive(pgid):
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
@@ -357,7 +382,7 @@ def _terminate_child(child: subprocess.Popen[Any], timeout: float = 5.0) -> None
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("supervised child could not be reaped after SIGKILL") from exc
 
-    if not _wait_for_group_exit(pgid, kill_deadline):
+    if group_accessible and not _wait_for_group_exit(pgid, kill_deadline):
         raise RuntimeError("supervised child process group survived SIGKILL")
 
     setattr(child, "_hermes_omp_cleanup_done", True)
