@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from . import __version__
 from .bridge import FileInbox
-from .core import Outbox, Paths, SCHEMA_VERSION, Session, SessionStore, VALID_POLICY_PROFILES, atomic_write, redact, slug, validate_session
+from .core import Outbox, Paths, SCHEMA_VERSION, Session, SessionStore, VALID_POLICY_PROFILES, _migrate_abandoned_legacy_lock, _path_lock, atomic_write, redact, slug, validate_session
 from .runtime import inspect_adoption, owner_lock_live, run
 from .service import backend_for
 from .logging import LogConfig, StructuredLog, iter_log_records, purge_log_family
@@ -114,7 +114,7 @@ def _restore_file(path: Path, backup: Optional[bytes]) -> None:
     if backup is None:
         path.unlink(missing_ok=True)
     else:
-        atomic_write(path, backup.decode("utf-8"))
+        atomic_write(path, backup)
 
 
 def _persist_and_install(
@@ -193,6 +193,53 @@ def _wait_owner_stopped(paths: Paths, name: str) -> bool:
     return True
 
 
+def _legacy_lock_repairs(
+    paths: Paths, *, fix: bool, dry_run: bool
+) -> list[dict[str, Any]]:
+    repairs: list[dict[str, Any]] = []
+
+    def inspect() -> None:
+        live_session_owner = False
+        if paths.run.exists():
+            for lock in paths.run.glob("*.owner"):
+                live = owner_lock_live(lock)
+                if live:
+                    live_session_owner = True
+                else:
+                    repairs.append({"action": "remove_stale_lock", "path": str(lock), "applied": fix and not dry_run})
+                    if fix and not dry_run: lock.unlink(missing_ok=True)
+        for directory in (paths.sessions, paths.run, paths.outbox):
+            if not directory.exists():
+                continue
+            for lock in directory.glob("*.lock"):
+                try:
+                    is_legacy_directory = lock.is_dir() and not lock.is_symlink()
+                except OSError:
+                    continue
+                if not is_legacy_directory:
+                    continue
+                repair = {
+                    "action": "migrate_legacy_path_lock",
+                    "path": str(lock),
+                    "applied": False,
+                }
+                apply_migration = bool(fix and not dry_run and not live_session_owner)
+                if _migrate_abandoned_legacy_lock(lock, apply=apply_migration):
+                    repair["applied"] = apply_migration
+                    if fix and not dry_run and live_session_owner:
+                        repair["reason"] = "live_writer"
+                else:
+                    repair["reason"] = "live_or_unverifiable_owner"
+                repairs.append(repair)
+
+    if fix and not dry_run:
+        with _path_lock(paths.run / ".owner-migration"):
+            inspect()
+    else:
+        inspect()
+    return repairs
+
+
 def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, Any]:
     omp = os.environ.get("HERMES_OMP_BINARY") or shutil.which("omp")
     hermes = os.environ.get("HERMES_OMP_HERMES") or shutil.which("hermes")
@@ -202,15 +249,10 @@ def doctor(paths: Paths, fix: bool = False, dry_run: bool = False) -> dict[str, 
         if not path.exists():
             repairs.append({"action": "mkdir", "path": str(path), "applied": fix and not dry_run})
             if fix and not dry_run: path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        elif stat.S_IMODE(path.stat().st_mode) != 0o700:
+        elif os.name != "nt" and stat.S_IMODE(path.stat().st_mode) != 0o700:
             repairs.append({"action": "chmod", "path": str(path), "mode": "0700", "applied": fix and not dry_run})
             if fix and not dry_run: os.chmod(path, 0o700)
-    if paths.run.exists():
-        for lock in paths.run.glob("*.owner"):
-            live = owner_lock_live(lock)
-            if not live:
-                repairs.append({"action": "remove_stale_lock", "path": str(lock), "applied": fix and not dry_run})
-                if fix and not dry_run: lock.unlink(missing_ok=True)
+    repairs.extend(_legacy_lock_repairs(paths, fix=fix, dry_run=dry_run))
     if paths.logs.exists():
         config = LogConfig.from_env()
         for log in paths.logs.glob("*.jsonl"):

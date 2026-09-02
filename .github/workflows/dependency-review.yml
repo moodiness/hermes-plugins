@@ -14,9 +14,6 @@ jobs:
   dependency-review:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -24,5 +21,5 @@ jobs:
         uses: actions/dependency-review-action@cc4f6536e38d1126c5e3b0683d469a14f23bfea4 # v3
         with:
           fail-on-severity: moderate
-          comment-summary-in-pr: always
+          comment-summary-in-pr: never
           retry-on-snapshot-warnings: true
