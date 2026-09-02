@@ -35,6 +35,7 @@ _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCK_DEPTH = threading.local()
 _LOCK_POLL_SECONDS = 0.01
 _LOCK_STALE_SECONDS = 300.0
+_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 def _normalized_path(path: Path) -> str:
@@ -95,11 +96,14 @@ def _path_lock(path: Path):
             lock_path = path.with_name(path.name + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             token = secrets.token_hex(16)
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
             while True:
                 try:
                     lock_path.mkdir()
                 except FileExistsError:
                     _remove_stale_lock(lock_path)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"timed out waiting for lock: {lock_path}")
                     time.sleep(_LOCK_POLL_SECONDS)
                     continue
                 try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import stat
 import time
@@ -8,9 +9,6 @@ import threading
 from pathlib import Path
 
 import pytest
-import sys
-from types import SimpleNamespace
-
 import hermes_omp.core as core
 
 from hermes_omp.core import (
@@ -248,67 +246,91 @@ def test_stale_writer_does_not_overwrite_malformed_queue(tmp_path: Path) -> None
     assert path.read_bytes() == b"{not-json"
 
 
-@pytest.mark.parametrize("platform", ["posix", "nt"])
-def test_path_lock_uses_platform_lock_and_releases_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
-) -> None:
-    calls: list[tuple[object, ...]] = []
-    if platform == "posix":
-        manager = SimpleNamespace(
-            LOCK_EX="exclusive",
-            LOCK_UN="unlock",
-            flock=lambda fd, mode: calls.append((fd, mode)),
-        )
-        monkeypatch.setitem(sys.modules, "fcntl", manager)
-    else:
-        manager = SimpleNamespace(
-            LK_LOCK="exclusive",
-            LK_UNLCK="unlock",
-            locking=lambda fd, mode, size: calls.append((fd, mode, size)),
-        )
-        monkeypatch.setitem(sys.modules, "msvcrt", manager)
-    monkeypatch.setattr(core.os, "name", platform)
+def _hold_path_lock(path: str, acquired, release) -> None:
+    with core._path_lock(Path(path)):
+        acquired.set()
+        release.wait(5)
+
+
+def _acquire_path_lock(path: str, acquired) -> None:
+    with core._path_lock(Path(path)):
+        acquired.set()
+
+
+def test_path_lock_excludes_other_processes_and_releases(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
     path = tmp_path / "queue.json"
-
-    with pytest.raises(RuntimeError, match="inside lock"):
-        with core._path_lock(path):
-            with core._path_lock(path):
-                assert path.with_name("queue.json.lock").read_bytes() == b"\0"
-                raise RuntimeError("inside lock")
-
-    modes = [call[1] for call in calls]
-    assert modes == ["exclusive", "unlock"]
-
-
-def test_path_lock_setup_failure_does_not_skip_next_platform_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[object] = []
-    manager = SimpleNamespace(
-        LOCK_EX="exclusive",
-        LOCK_UN="unlock",
-        flock=lambda fd, mode: calls.append(mode),
+    first_acquired = context.Event()
+    second_acquired = context.Event()
+    release_first = context.Event()
+    first = context.Process(
+        target=_hold_path_lock, args=(str(path), first_acquired, release_first)
     )
-    monkeypatch.setitem(sys.modules, "fcntl", manager)
-    monkeypatch.setattr(core.os, "name", "posix")
+    second = context.Process(target=_acquire_path_lock, args=(str(path), second_acquired))
+    first.start()
+    try:
+        assert first_acquired.wait(5)
+        second.start()
+        assert not second_acquired.wait(0.2)
+        release_first.set()
+        assert second_acquired.wait(5)
+    finally:
+        release_first.set()
+        first.join(5)
+        if second.pid is not None:
+            second.join(5)
+        if first.is_alive():
+            first.terminate()
+        if second.pid is not None and second.is_alive():
+            second.terminate()
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert not path.with_name("queue.json.lock").exists()
+
+
+def test_path_lock_recovers_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "queue.json"
     lock_path = path.with_name("queue.json.lock")
-    original_open = Path.open
-    failed = False
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps({"pid": 99999999, "created_at": 0, "token": "stale"})
+    )
+    monkeypatch.setattr(core, "_LOCK_STALE_SECONDS", 0)
 
-    def fail_first_open(self, *args, **kwargs):
-        nonlocal failed
-        if self == lock_path and not failed:
-            failed = True
-            raise OSError("injected lock open failure")
-        return original_open(self, *args, **kwargs)
+    with core._path_lock(path):
+        owner = json.loads((lock_path / "owner.json").read_text())
+        assert owner["token"] != "stale"
 
-    monkeypatch.setattr(Path, "open", fail_first_open)
+    assert not lock_path.exists()
 
-    with pytest.raises(OSError, match="injected lock open failure"):
+
+def test_path_lock_times_out_while_another_owner_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "queue.json"
+    lock_path = path.with_name("queue.json.lock")
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": "live"})
+    )
+    monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0)
+
+    with pytest.raises(TimeoutError, match="timed out waiting for lock"):
         with core._path_lock(path):
             pass
-    with core._path_lock(path):
-        pass
 
-    assert calls == ["exclusive", "unlock"]
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["token"] == "live"
+
+
+def test_path_lock_release_does_not_delete_another_owners_lock(tmp_path: Path) -> None:
+    path = tmp_path / "queue.json"
+    lock_path = path.with_name("queue.json.lock")
+
+    with core._path_lock(path):
+        (lock_path / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": "replacement"})
+        )
+
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["token"] == "replacement"
