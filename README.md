@@ -26,8 +26,6 @@ From another current directory, invoke the script by absolute path, for example 
 
 `test`, `build`, and `doctor` may also take one plugin id. Test and build commands create/reuse an ignored `.venv-verify` in each plugin, upgrade it to `pip>=21.3`, and install that plugin's `.[dev]` extra. Set `PLUGIN_VERIFY_PYTHON=/path/to/python` to choose the base Python used to create verification environments and read the catalog. Builds preserve tracked release artifacts, add freshly built distributions, then deterministically refresh and verify `dist/SHA256SUMS`. Doctor validates the plugin directory without installing it.
 
-Checked-in nested `artifacts/` transcripts are historical records, not evidence of the current tree. Use fresh command output for current verification; release distributions and their checksums live in the nested plugin's `dist/` directory.
-
 ## Install a plugin
 
 Follow the nested plugin's README. Do not install the monorepo root as a Python package. A manual hermes-omp installation has two parts: install its wheel into the same isolated Python environment that supplies Hermes, then copy `plugins/hermes-omp/plugin` into the active profile's plugin root as `omp`. Run `hermes plugins doctor <source-or-copied-plugin-path> --ci` before enabling `omp`, then run `hermes omp doctor --json` as the operational check.

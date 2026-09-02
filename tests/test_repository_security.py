@@ -103,3 +103,25 @@ def test_repository_has_no_internal_ai_workflow_provenance() -> None:
         if prohibited.search(text):
             findings.append(relative)
     assert not findings, findings
+
+
+def test_repository_has_no_checked_in_transcripts_or_local_build_evidence() -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, check=True, text=True, capture_output=True
+    ).stdout.splitlines()
+    prohibited_parts = {
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "artifacts",
+        "build",
+    }
+    prohibited_suffixes = {".log", ".pyc", ".pyo", ".swp", ".tmp"}
+    findings = [
+        path
+        for path in tracked
+        if prohibited_parts.intersection(Path(path).parts)
+        or Path(path).suffix.lower() in prohibited_suffixes
+    ]
+    assert not findings, findings

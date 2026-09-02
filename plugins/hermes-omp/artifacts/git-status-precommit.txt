@@ -1,6 +1,0 @@
-## main
-?? artifacts/SHA256SUMS
-?? artifacts/build.txt
-?? artifacts/doctor.json
-?? artifacts/git-status-precommit.txt
-?? artifacts/tests-final.txt

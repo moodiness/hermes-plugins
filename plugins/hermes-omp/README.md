@@ -81,4 +81,4 @@ python -m pip install -r requirements-build.txt
 sh scripts/build-release.sh
 ```
 
-Use `.venv\Scripts\activate` on Windows. Relative paths above are plugin-root-relative; use absolute paths when invoking them elsewhere. Files under `artifacts/` are historical transcripts, not fresh proof for the current checkout.
+Use `.venv\Scripts\activate` on Windows. Relative paths above are plugin-root-relative; use absolute paths when invoking them elsewhere.
