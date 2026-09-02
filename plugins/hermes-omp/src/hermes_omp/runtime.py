@@ -18,6 +18,8 @@ from .bridge import FileInbox, HermesSendBridge
 from .core import Authorization, Outbox, Paths, Question, Session, SessionStore, atomic_write, classify_safe_answer, parse_rpc_line, redact
 from .logging import StructuredLog
 
+RESTART_BUDGET_EXIT = 0
+
 
 def build_omp_command(session: Session, omp_path: str) -> list[str]:
     command = [omp_path, *session.omp_options, "--mode", "rpc", "--model", session.model]
@@ -51,14 +53,15 @@ class Runtime:
         self.transition_max_bytes=max(256, transition_max_bytes)
         self.telemetry_enabled=False
         self.notified=set(str(x) for x in state.get("notified",[]))
-        self.restarts=[float(x) for x in state.get("restarts",[])]
+        self.launch_attempts=[float(x) for x in state.get("launch_attempts",state.get("restarts",[]))]
+        self.restarts=self.launch_attempts
         usage=state.get("usage",{})
         self.usage={"total_tokens":int(usage.get("total_tokens",0)),"cost_usd":float(usage.get("cost_usd",0.0))}
         if started_at is None:
             self.started_at=float(state.get("started_at",self.started_at))
 
     def _save_state(self) -> None:
-        atomic_write(self.state_path,json.dumps({"question":self.question.to_dict() if self.question else None,"seen_event_ids":sorted(self.seen),"notified":sorted(self.notified),"restarts":self.restarts,"usage":self.usage,"started_at":self.started_at},indent=2)+"\n")
+        atomic_write(self.state_path,json.dumps({"question":self.question.to_dict() if self.question else None,"seen_event_ids":sorted(self.seen),"notified":sorted(self.notified),"launch_attempts":self.launch_attempts,"restarts":self.launch_attempts,"usage":self.usage,"started_at":self.started_at},indent=2)+"\n")
 
     def notification(self, kind: str, key: str, text: str) -> Optional[dict[str, Any]]:
         if kind not in self.session.notifications or not self.session.notifications[kind]: return None
@@ -75,17 +78,31 @@ class Runtime:
     def restart_status(self, now: Optional[float]=None) -> dict[str, Any]:
         stamp=time.time() if now is None else now
         window=self.session.restart_window_seconds
-        recent=[value for value in self.restarts if not window or stamp-value <= window]
+        recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
         cooldown_remaining=max(0.0, (recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
-        limit_reached=bool(self.session.max_restarts and len(recent)>=self.session.max_restarts)
-        return {"allowed":not limit_reached and cooldown_remaining<=0,"count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+        restarts=max(0,len(recent)-1)
+        limit_reached=bool(self.session.max_restarts and restarts>=self.session.max_restarts)
+        return {"allowed":not limit_reached and cooldown_remaining<=0,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+
+    def claim_launch(self, now: Optional[float]=None) -> dict[str, Any]:
+        stamp=time.time() if now is None else now
+        window=self.session.restart_window_seconds
+        recent=[value for value in self.launch_attempts if value <= stamp and (not window or stamp-value <= window)]
+        cooldown_remaining=max(0.0,(recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
+        restarts=max(0,len(recent)-1)
+        allowed=(not self.session.max_restarts or restarts < self.session.max_restarts) and cooldown_remaining <= 0
+        status={"allowed":allowed,"count":restarts,"launch_count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+        if allowed:
+            recent.append(stamp)
+            self.launch_attempts=recent; self.restarts=recent; self._save_state()
+        return status
 
     def record_restart(self, now: Optional[float]=None) -> dict[str, Any]:
         stamp=time.time() if now is None else now
         status=self.restart_status(stamp)
         if status["allowed"]:
-            self.restarts=[value for value in self.restarts if not self.session.restart_window_seconds or stamp-value<=self.session.restart_window_seconds]
-            self.restarts.append(stamp); self._save_state()
+            self.launch_attempts=[value for value in self.launch_attempts if value <= stamp and (not self.session.restart_window_seconds or stamp-value<=self.session.restart_window_seconds)]
+            self.launch_attempts.append(stamp); self.restarts=self.launch_attempts; self._save_state()
         return status
 
     def budget_status(self, now: Optional[float]=None) -> dict[str, Any]:
@@ -116,6 +133,14 @@ class Runtime:
         path=self.paths.logs/f"{self.session.name}.transitions.ndjson"; path.parent.mkdir(parents=True,exist_ok=True)
         record={"timestamp":time.time() if now is None else now,"session":self.session.name,"from":previous,"to":current,"reason":str(redact(details.get("reason",current)))[:256],"details":redact(details)}
         line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
+        if len(line.encode("utf-8")) > self.transition_max_bytes:
+            record["details"]={"truncated":True}
+            record["reason"]=record["reason"][:32]
+            record["truncated"]=True
+            line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
+            if len(line.encode("utf-8")) > self.transition_max_bytes:
+                record["reason"]="truncated"
+                line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
         existing=path.read_text(encoding="utf-8") if path.exists() else ""
         combined=(existing+line).encode("utf-8")
         while len(combined)>self.transition_max_bytes and "\n" in combined.decode("utf-8",errors="ignore"):
@@ -409,6 +434,18 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
             raise RuntimeError(f"session identity changed: {session.name}")
         lock=paths.run/f"{session.name}.owner"
         fd,lock_token=acquire_owner_lock(lock,session.id)
+        runtime_path = paths.run / f"{name}.omp-path"
+        configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
+        runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
+        launch_status=runtime.claim_launch()
+        if launch_status["allowed"]:
+            session.status="launching"
+        else:
+            stamp=time.time()
+            store.patch(session.name,session.id,status="restart_budget_exceeded",last_activity=stamp,supervisor_pid=0,omp_pid=0)
+            runtime.transition(session.status,"restart_budget_exceeded",{"reason":"restart_budget_exceeded","restart":launch_status})
+            release_owner_lock(lock,fd,lock_token)
+            return RESTART_BUDGET_EXIT
     child: Optional[subprocess.Popen[str]]=None
     selector: Optional[selectors.BaseSelector]=None
     line_buffer: Optional[RpcLineBuffer]=None
@@ -425,10 +462,10 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
     outbox=Outbox(outbox_path); inbox=FileInbox(paths.inbox/session.name)
     bridge_environment=dict(os.environ); bridge_environment["HERMES_HOME"]=str(paths.root.parent)
     bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"),environ=bridge_environment)
-    runtime_path = paths.run / f"{name}.omp-path"
-    configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
-    runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
+
     if not runtime.should_start():
+        store.patch(session.name,session.id,status="budget_unenforceable",last_activity=time.time(),supervisor_pid=0,omp_pid=0)
+        release_owner_lock(lock,fd,lock_token)
         raise RuntimeError("configured token/cost cap cannot be enforced: trustworthy public OMP RPC usage is unavailable")
 
     log_path=paths.logs/f"{session.name}.jsonl"; event_log=StructuredLog(log_path)

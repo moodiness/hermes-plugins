@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,6 +83,76 @@ def test_restart_window_and_cooldown_are_durable(tmp_path: Path) -> None:
     assert restarted.restart_status(now=200)["allowed"] is True
 
 
+def test_real_supervisor_startup_persists_and_enforces_restart_budget_across_invocations(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(
+        name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=1,
+        restart_window_seconds=3600, restart_cooldown_seconds=0,
+    )
+    SessionStore(paths).create(session)
+    fake_omp = tmp_path / "fake_omp.py"
+    fake_omp.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    fake_omp.chmod(0o755)
+    (paths.run / "demo.omp-path").write_text(str(fake_omp) + "\n")
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    command = [sys.executable, "-m", "hermes_omp.runtime", "demo", "--root", str(paths.root), "--expected-session-id", session.id]
+
+    first = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+    second = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+    third = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+
+    assert first.returncode == 1
+    assert second.returncode == 1
+    assert third.returncode == 0
+    state = json.loads((paths.run / "demo.runtime.json").read_text())
+    assert len(state["launch_attempts"]) == 2  # first launch is free; one restart is allowed
+    stored = SessionStore(paths).load("demo")
+    assert stored.status == "restart_budget_exceeded"
+    assert stored.supervisor_pid == stored.omp_pid == 0
+
+
+def test_inspection_commands_do_not_consume_restart_budget(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=1, restart_window_seconds=3600)
+    SessionStore(paths).create(session)
+    assert cli.dispatch_namespace(cli.build_parser().parse_args(["status", "demo", "--json"]), paths) == 0
+    capsys.readouterr()
+    assert not (paths.run / "demo.runtime.json").exists()
+
+
+def test_concurrent_launch_attempts_cannot_bypass_restart_budget(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=1, restart_window_seconds=3600)
+    SessionStore(paths).create(session)
+    fake_omp = tmp_path / "fake_omp.py"
+    fake_omp.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(.2)\n")
+    fake_omp.chmod(0o755)
+    (paths.run / "demo.omp-path").write_text(str(fake_omp) + "\n")
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    command = [sys.executable, "-m", "hermes_omp.runtime", "demo", "--root", str(paths.root), "--expected-session-id", session.id]
+    processes = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    codes = [process.wait(timeout=20) for process in processes]
+    assert codes.count(1) >= 1
+    state = json.loads((paths.run / "demo.runtime.json").read_text())
+    assert len(state["launch_attempts"]) == 1
+
+
+def test_stale_and_future_launch_history_cannot_bypass_budget(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=1, restart_window_seconds=60)
+    SessionStore(paths).create(session)
+    now = 1000.0
+    runtime_path = paths.run / "demo.runtime.json"
+    runtime_path.write_text(json.dumps({"launch_attempts": [now - 1000, now, now + 1000]}) + "\n")
+    runtime = Runtime(session, paths, omp_path="/bin/true", started_at=now)
+    first = runtime.claim_launch(now=now + 1)
+    second = Runtime(session, paths, omp_path="/bin/true", started_at=now).claim_launch(now=now + 2)
+    assert first["allowed"] is True
+    assert second["allowed"] is False
+    saved = json.loads(runtime_path.read_text())["launch_attempts"]
+    assert saved == [now, now + 1]
+
+
 def test_usage_caps_fail_closed_without_trustworthy_public_rpc(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
     session = Session.new(
@@ -124,6 +197,20 @@ def test_transition_log_is_bounded_structured_redacted_and_local(tmp_path: Path)
     assert all(set(record) == {"timestamp", "session", "from", "to", "reason", "details"} for record in records)
     assert "secret-" not in path.read_text()
     assert runtime.telemetry_enabled is False
+
+
+def test_oversized_transition_leaves_one_valid_bounded_redacted_record(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="mission")
+    SessionStore(paths).create(session)
+    runtime = Runtime(session, paths, omp_path="/bin/true", transition_max_bytes=256)
+    runtime.transition("running", "crashed", {"reason": "token=secret", "payload": "x" * 10000})
+    path = paths.logs / "demo.transitions.ndjson"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert path.stat().st_size <= 256
+    assert len(records) == 1
+    assert records[0]["truncated"] is True
+    assert "secret" not in path.read_text()
 
 
 def test_dashboard_snapshot_is_bounded_redacted_read_only(tmp_path: Path) -> None:
@@ -183,6 +270,18 @@ def test_cli_rejects_negative_budgets_before_persisting(tmp_path: Path, capsys: 
     assert cli.dispatch_namespace(args, paths) == cli.EXIT_VALIDATION
     assert not (paths.sessions / "demo.json").exists()
     assert "non-negative" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_rejects_non_finite_budget_values(value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    paths = Paths(tmp_path / "omp")
+    args = cli.build_parser().parse_args([
+        "create", "demo", "--cwd", str(tmp_path), "--model", "m", "--mission", "mission",
+        f"--max-duration={value}", "--omp-path", "/bin/true", "--no-install", "--json",
+    ])
+    assert cli.dispatch_namespace(args, paths) == cli.EXIT_VALIDATION
+    assert not (paths.sessions / "demo.json").exists()
+    assert "finite" in capsys.readouterr().out
 
 
 def test_root_pytest_configuration_prepends_worktree_source() -> None:

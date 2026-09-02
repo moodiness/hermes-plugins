@@ -1,6 +1,6 @@
 # CLI reference
 
-The native plugin registers `hermes omp`; the wheel also exposes `hermes-omp` with the same operator parser. Public commands accept `--json` unless noted. Exit codes are 0 success, 1 operational/health failure, 2 usage, 3 not found, 4 conflict, and 5 validation.
+The native plugin registers `hermes omp`; the wheel also exposes `hermes-omp` with the same operator parser. Public commands accept `--json` unless noted. Exit codes are 0 success, 1 operational/health failure, 2 usage, 3 not found, 4 conflict, and 5 validation. The internal supervisor returns success for a restart-budget refusal while persisting `restart_budget_exceeded`, so launchd/systemd/Task Scheduler failure-only policies stop retrying it.
 
 - `doctor [--fix] [--dry-run] [--json]`: inspect executables, profile state, service backend selection, stale owner locks, and oversized logs. `--fix` safely rotates oversized inactive logs and refuses live writers.
 - `create NAME --cwd DIR --model MODEL --mission TEXT [--project TEXT] [--platform ID] [--chat ID] [--topic ID] [--allowed-user ID] [--resume ID] [--restart-policy never|on-failure|always] [--omp-path PATH] [--omp-option OPTION] [--no-install] [--start] [--dry-run] [--json]`.
@@ -14,7 +14,7 @@ The native plugin registers `hermes omp`; the wheel also exposes `hermes-omp` wi
 - `update NAME [--model VALUE] [--mission TEXT] [--platform ID] [--chat ID] [--topic ID] [--allowed-user ID] [--restart-policy ...] [--omp-option OPTION] [--apply-restart] [--dry-run] [--no-install] [--json]`: transactionally change session configuration. Active sessions require `--apply-restart`. This does not upgrade the distribution or native plugin.
 - `stop NAME [--json]`; `restart NAME [--json]`; `remove NAME [--no-service] [--purge-logs] [--json]`. Removal retains logs unless purge is explicit.
 - `config validate NAME [--json]`; `config template [--json]`; `completion bash|zsh|fish [--json]`.
-- `create NAME ... [--no-notify KIND] [--max-duration SECONDS] [--max-restarts N] [--restart-window SECONDS] [--restart-cooldown SECONDS] [--max-tokens N] [--max-cost-usd USD]`: notification and budget controls persist with the session. Nonzero token/cost caps fail closed until trustworthy public OMP RPC usage exists.
+- `create NAME ... [--no-notify KIND] [--max-duration SECONDS] [--max-restarts N] [--restart-window SECONDS] [--restart-cooldown SECONDS] [--max-tokens N] [--max-cost-usd USD]`: notification and finite non-negative budget controls persist with the session. The initial launch is free; `--max-restarts N` permits N later launches in the window. Nonzero token/cost caps fail closed until trustworthy public OMP RPC usage exists.
 - `migrate-legacy NAME [--source FILE] [--apply] [--adopt] [--no-install] [--start] [--json]`: map a reviewed legacy JSON record. The default is a non-writing preview; `--apply` permits persistence and `--adopt` separately permits reuse of the recorded OMP resume identity. No process is inspected or stopped.
 - `watch NAME [--poll-interval SECONDS] [--max-polls N] [--json]`: emit the baseline and changed status snapshots. JSON mode is compact NDJSON, one object per line.
 - `diagnose NAME [--output FILE] [--log-lines N] [--event-limit N] [--json]`: produce a bounded, redacted offline report from plugin-owned files. Output files are private.

@@ -259,7 +259,16 @@ def _budget_snapshot(session: Session, paths: Paths) -> dict[str, Any]:
     elapsed=max(0.0,time.time()-float(state.get("started_at",time.time()))) if state else 0.0
     duration={"state":"unlimited" if not session.max_duration_seconds else ("exceeded" if elapsed>session.max_duration_seconds else "within_limit"),"elapsed_seconds":elapsed,"limit":session.max_duration_seconds}
     unavailable={"state":"unavailable","enforceable":False,"reason":"trustworthy_public_rpc_usage_unavailable"}
-    return {"duration":duration,"tokens":dict(unavailable) if session.max_tokens else {"state":"unlimited","enforceable":False},"cost":dict(unavailable) if session.max_cost_usd else {"state":"unlimited","enforceable":False}}
+    attempts=[]
+    for value in state.get("launch_attempts",state.get("restarts",[])):
+        try:
+            stamp=float(value)
+        except (TypeError,ValueError):
+            continue
+        if math.isfinite(stamp) and stamp <= time.time() and (not session.restart_window_seconds or time.time()-stamp <= session.restart_window_seconds): attempts.append(stamp)
+    cooldown=max(0.0,(attempts[-1]+session.restart_cooldown_seconds-time.time()) if attempts else 0.0)
+    restart={"allowed":(not session.max_restarts or max(0,len(attempts)-1)<session.max_restarts) and cooldown<=0,"count":max(0,len(attempts)-1),"launch_count":len(attempts),"limit":session.max_restarts,"window_seconds":session.restart_window_seconds,"cooldown_remaining_seconds":cooldown}
+    return {"duration":duration,"tokens":dict(unavailable) if session.max_tokens else {"state":"unlimited","enforceable":False},"cost":dict(unavailable) if session.max_cost_usd else {"state":"unlimited","enforceable":False},"restart":restart}
 
 
 def dashboard_snapshot(paths: Paths, log_limit: int = 20) -> dict[str, Any]:

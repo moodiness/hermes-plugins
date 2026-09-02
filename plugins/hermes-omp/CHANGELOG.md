@@ -8,6 +8,8 @@
 - Added per-kind question/error/milestone/completion/restart notification controls with durable deduplication.
 - Added duration and restart-window/cooldown budgets. Token/cost caps fail closed with truthful unavailable status when trustworthy public OMP RPC usage is absent.
 - Added bounded redacted local transition NDJSON with no telemetry and an opt-in public-SDK Desktop dashboard for sessions, health, questions, and log summaries; actions require confirmation and validated CLI contracts.
+- Made supervisor launch claims atomic and persistent across manager invocations, with explicit free initial-launch semantics, concurrent/stale-state safety, truthful restart-budget status, and a stable non-failure refusal that halts failure-only service restart loops.
+- Kept oversized transition events as valid bounded redacted/truncated NDJSON records and rejected non-finite budget values.
 
 - Replaced unavailable macOS `os.waitid` supervision with portable `Popen.poll`/`wait` cleanup while preserving process-group termination and owner-lock safety.
 - Added private bounded structured NDJSON logs with cross-process rotation, retention, record truncation/redaction, delta filtering, rotation-aware reads, doctor remediation, and explicit log purge.

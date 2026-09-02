@@ -64,7 +64,7 @@ def test_systemd_user_unit_generation_quotes_literal_values() -> None:
         '"hermes_omp.runtime" "demo" "--root" '
         '"/tmp/state 100%%/$$HOME/\\"quoted\\"/omp"'
     ) in text
-    assert "Restart=always" in text
+    assert "Restart=on-failure" in text
 
 
 @pytest.mark.parametrize("hostile", ["line\nfeed", "carriage\rreturn", "nul\0byte"])
@@ -77,7 +77,7 @@ def test_systemd_definition_rejects_control_characters(hostile: str) -> None:
         backend.definition("demo", ["python"], hostile, "never")
 
 
-@pytest.mark.parametrize(("policy","restart_count"), [("never",None),("on-failure","3"),("always","999")])
+@pytest.mark.parametrize(("policy","restart_count"), [("never",None),("on-failure","999"),("always","999")])
 def test_windows_task_xml_generation_honors_restart_policy(policy: str, restart_count: str | None) -> None:
     command = [
         'C:\\Program Files\\Python "Special"\\python.exe',

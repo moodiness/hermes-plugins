@@ -4,6 +4,7 @@ import dataclasses
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -347,7 +348,8 @@ def validate_session(session: Session) -> list[str]:
     if session.policy_profile not in VALID_POLICY_PROFILES: errors.append("invalid policy_profile")
     if set(session.notifications) != set(NOTIFICATION_KINDS) or not all(isinstance(value, bool) for value in session.notifications.values()): errors.append("notifications must contain boolean question,error,milestone,completion,restart controls")
     budget_values=(session.max_duration_seconds,session.max_restarts,session.restart_window_seconds,session.restart_cooldown_seconds,session.max_tokens,session.max_cost_usd)
-    if not all(isinstance(value,(int,float)) and not isinstance(value,bool) and value >= 0 for value in budget_values): errors.append("budgets must be non-negative numbers")
+    if not all(isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) for value in budget_values): errors.append("budgets must be finite numbers")
+    elif not all(value >= 0 for value in budget_values): errors.append("budgets must be non-negative numbers")
     return errors
 
 

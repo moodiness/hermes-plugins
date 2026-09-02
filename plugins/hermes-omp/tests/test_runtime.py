@@ -712,7 +712,12 @@ def test_run_cleans_child_when_proactive_marker_write_fails(tmp_path: Path, monk
 
     monkeypatch.setattr("hermes_omp.runtime.subprocess.Popen", capture_child)
     monkeypatch.setattr("hermes_omp.runtime.signal.signal", lambda *_: None)
-    monkeypatch.setattr("hermes_omp.runtime.atomic_write", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("marker write failed")))
+    real_atomic_write = __import__("hermes_omp.runtime", fromlist=["atomic_write"]).atomic_write
+    def fail_owner_marker(path, *args, **kwargs):
+        if Path(path).name.endswith(".owner"):
+            raise OSError("marker write failed")
+        return real_atomic_write(path, *args, **kwargs)
+    monkeypatch.setattr("hermes_omp.runtime.atomic_write", fail_owner_marker)
     monkeypatch.setattr(HermesSendBridge, "deliver", lambda *_: None)
     monkeypatch.setenv("HERMES_OMP_BINARY", sys.executable)
     monkeypatch.setenv("FAKE_OMP_PID", str(tmp_path / "fake.pid"))
