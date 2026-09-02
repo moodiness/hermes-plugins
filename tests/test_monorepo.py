@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).parents[1]
@@ -45,6 +51,76 @@ def test_ci_matrix_starts_at_supported_python() -> None:
     standalone_workflow = (PLUGIN / ".github" / "workflows" / "ci.yml").read_text()
     assert '("3.10", "3.11", "3.13")' in matrix_script
     assert "['3.10', '3.11', '3.13']" in standalone_workflow
+
+
+def test_release_build_uses_bash_on_every_matrix_os() -> None:
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    release_steps = [
+        step
+        for step in workflow["jobs"]["verify"]["steps"]
+        if "scripts/build-release.sh" in step.get("run", "")
+    ]
+    assert len(release_steps) == 1
+    assert release_steps[0].get("shell") == "bash"
+
+
+def test_release_build_checksums_do_not_depend_on_platform_tools(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    scripts = package / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(PLUGIN / "scripts" / "build-release.sh", scripts)
+
+    fake_modules = tmp_path / "modules"
+    fake_build = fake_modules / "build"
+    fake_build.mkdir(parents=True)
+    (fake_build / "__init__.py").touch()
+    (fake_build / "__main__.py").write_text(
+        """from pathlib import Path
+import zipfile
+
+Path("dist").mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile("dist/example.whl", "w") as archive:
+    archive.writestr("example.py", "VALUE = 1\\n")
+Path("dist/example.tar.gz").write_bytes(b"example sdist")
+""",
+        encoding="utf-8",
+    )
+
+    blocked_tools = tmp_path / "blocked-tools"
+    blocked_tools.mkdir()
+    for name in ("shasum", "sha256sum"):
+        tool = blocked_tools / name
+        tool.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        tool.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{blocked_tools}{os.pathsep}{env['PATH']}",
+            "PYTHON": sys.executable,
+            "PYTHONPATH": f"{fake_modules}{os.pathsep}{env.get('PYTHONPATH', '')}",
+            "SOURCE_DATE_EPOCH": "315532800",
+        }
+    )
+    result = subprocess.run(
+        ["sh", str(scripts / "build-release.sh")],
+        cwd=package,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    dist = package / "dist"
+    rows = [
+        line.split("  ", 1)
+        for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [name for _, name in rows] == ["example.tar.gz", "example.whl"]
+    for digest, name in rows:
+        assert digest == hashlib.sha256((dist / name).read_bytes()).hexdigest()
 
 
 

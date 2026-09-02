@@ -122,19 +122,31 @@ def test_inspection_commands_do_not_consume_restart_budget(tmp_path: Path, capsy
 
 def test_concurrent_launch_attempts_cannot_bypass_restart_budget(tmp_path: Path) -> None:
     paths = Paths(tmp_path / "omp")
-    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=1, restart_window_seconds=3600)
+    max_restarts = 3
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="", max_restarts=max_restarts, restart_window_seconds=3600)
     SessionStore(paths).create(session)
-    fake_omp = tmp_path / "fake_omp.py"
-    fake_omp.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(.2)\n")
-    fake_omp.chmod(0o755)
-    (paths.run / "demo.omp-path").write_text(str(fake_omp) + "\n")
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
-    command = [sys.executable, "-m", "hermes_omp.runtime", "demo", "--root", str(paths.root), "--expected-session-id", session.id]
-    processes = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
-    codes = [process.wait(timeout=20) for process in processes]
-    assert codes.count(1) >= 1
+    script = """
+import json
+import sys
+from pathlib import Path
+from hermes_omp.core import Paths, SessionStore
+from hermes_omp.runtime import Runtime
+paths = Paths(Path(sys.argv[1]))
+session = SessionStore(paths).load("demo")
+status = Runtime(session, paths, omp_path=sys.executable).claim_launch()
+print(json.dumps(status))
+"""
+    command = [sys.executable, "-c", script, str(paths.root)]
+    processes = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(24)]
+    results = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0, stderr
+        results.append(json.loads(stdout))
+    assert sum(result["allowed"] for result in results) == max_restarts + 1
     state = json.loads((paths.run / "demo.runtime.json").read_text())
-    assert len(state["launch_attempts"]) == 1
+    assert len(state["launch_attempts"]) == max_restarts + 1
 
 
 def test_stale_and_future_launch_history_cannot_bypass_budget(tmp_path: Path) -> None:
