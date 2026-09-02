@@ -138,6 +138,9 @@ def test_replace_import_restores_all_tracked_files_on_failure(
 
 
     class BrokenBackend:
+        def definition_path(self, name):
+            return tmp_path / f"{name}.service"
+
         def definition(self, *args, **kwargs):
             return {"fake": True}
 
@@ -236,6 +239,9 @@ def test_failed_replace_cannot_rollback_over_later_success(
     winner_entered = threading.Event()
 
     class Backend:
+        def definition_path(self, name):
+            return tmp_path / f"{name}.service"
+
         def definition(self, *args, **kwargs):
             return {"fake": True}
 
@@ -283,7 +289,7 @@ def test_failed_replace_cannot_rollback_over_later_success(
     assert json.loads((paths.run / "demo.runtime.json").read_text()) == {"model": "winner"}
 
 
-def test_replace_service_failure_restores_prior_definition(
+def test_replace_service_failure_restores_exact_prior_definition(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     create(tmp_path, capsys)
@@ -292,22 +298,27 @@ def test_replace_service_failure_restores_prior_definition(
     value = json.loads(archive.read_text())
     value["session"]["restart_policy"] = "always"
     archive.write_text(json.dumps(value))
+    service_path = tmp_path / "demo.service"
+    original_definition = b"opaque pre-existing definition\n"
+    service_path.write_bytes(original_definition)
     installs: list[str] = []
 
     class Backend:
+        def definition_path(self, name):
+            return service_path
+
         def definition(self, *args, **kwargs):
             return {"fake": True}
 
         def install(self, name, command, cwd, restart_policy, activate):
             installs.append(restart_policy)
-            if restart_policy == "always":
-                raise RuntimeError("injected replacement install failure")
+            service_path.write_bytes(b"partial replacement")
+            raise RuntimeError("injected replacement install failure")
 
         def remove(self, name):
-            raise AssertionError("replacement rollback must not remove the service")
+            raise AssertionError("pre-existing definition must be restored, not removed")
 
-    backend = Backend()
-    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: backend)
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
 
     with pytest.raises(RuntimeError, match="replacement install failure"):
         invoke(
@@ -315,8 +326,44 @@ def test_replace_service_failure_restores_prior_definition(
             "--json",
         )
 
-    assert installs == ["always", "on-failure"]
+    assert installs == ["always"]
+    assert service_path.read_bytes() == original_definition
     assert SessionStore(Paths.discover()).load("demo").restart_policy == "on-failure"
+
+
+def test_replace_service_failure_preserves_prior_absence(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create(tmp_path, capsys)
+    archive = tmp_path / "replace.json"
+    assert invoke(tmp_path, capsys, "export", "demo", str(archive), "--json")[0] == 0
+    service_path = tmp_path / "demo.service"
+    removed: list[str] = []
+
+    class Backend:
+        def definition_path(self, name):
+            return service_path
+
+        def definition(self, *args, **kwargs):
+            return {"fake": True}
+
+        def install(self, *args, **kwargs):
+            service_path.write_bytes(b"partial fresh definition")
+            raise RuntimeError("injected fresh install failure")
+
+        def remove(self, name):
+            removed.append(name)
+
+    monkeypatch.setattr(cli, "backend_for", lambda **kwargs: Backend())
+
+    with pytest.raises(RuntimeError, match="fresh install failure"):
+        invoke(
+            tmp_path, capsys, "import", str(archive), "--conflict", "replace",
+            "--json",
+        )
+
+    assert removed == ["demo"]
+    assert not service_path.exists()
 
 
 def test_update_requires_explicit_restart_for_live_session_and_dry_run_writes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:

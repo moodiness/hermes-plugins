@@ -115,10 +115,11 @@ def _persist_and_install(
             target: target.read_bytes() if target.exists() else None
             for target in targets
         }
-        previous = store.load(session.name) if replace else None
         written: list[Path] = []
+        service_backend = backend_for(root=paths.root) if not no_install else None
+        service_path = service_backend.definition_path(session.name) if service_backend is not None else None
+        service_backup = service_path.read_bytes() if service_path is not None and service_path.exists() else None
         service_install_attempted = False
-        service_install_succeeded = False
         try:
             try:
                 if replace:
@@ -142,19 +143,16 @@ def _persist_and_install(
             if not no_install:
                 service_install_attempted = True
                 _install(session, no_install, start, paths)
-                service_install_succeeded = True
         except Exception:
             for target in reversed(written):
                 _restore_file(target, backups[target])
-            if service_install_attempted:
-                backend = backend_for(root=paths.root)
+            if service_install_attempted and service_backend is not None and service_path is not None:
                 try:
-                    if previous is not None:
-                        backend.install(previous.name, _runtime_command(previous.name), previous.cwd, previous.restart_policy, activate=True)
-                        if start and service_install_succeeded:
-                            backend.start(previous.name)
+                    if service_backup is None:
+                        service_backend.remove(session.name)
+                        service_path.unlink(missing_ok=True)
                     else:
-                        backend.remove(session.name)
+                        atomic_write(service_path, service_backup)
                 except Exception:
                     pass
             raise
@@ -370,39 +368,96 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         _emit(args, {**plan, "imported": name}, f"Imported {name}")
         return EXIT_OK
     if args.command == "update":
-        session = _load(store, args.name); mutable = {"model": args.model, "mission": args.mission, "platform": args.platform, "chat": args.chat, "topic": args.topic, "allowed_users": args.allowed_user, "restart_policy": args.restart_policy, "omp_options": args.omp_option}; changes = {key: {"from": getattr(session, key), "to": value} for key, value in mutable.items() if value is not None and value != getattr(session, key)}
-        if not changes: raise CliError("no mutable changes requested", "validation", EXIT_VALIDATION)
-        for key, change in changes.items(): setattr(session, key, change["to"])
-        errors = validate_session(session)
-        if errors: raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
-        definition = _definition(session, paths); live = _owner_live(paths, session.name)
-        if args.dry_run: _emit(args, {"dry_run": True, "changes": changes, "service_definition": definition, "active": live}); return EXIT_OK
-        if live and not args.apply_restart: raise CliError("active session requires --apply-restart", "conflict", EXIT_CONFLICT)
-        backend = backend_for(root=paths.root); old = _load(store, args.name); old_data = json.dumps(dataclasses.asdict(old), indent=2, sort_keys=True) + "\n"
+        mutable = {"model": args.model, "mission": args.mission, "platform": args.platform, "chat": args.chat, "topic": args.topic, "allowed_users": args.allowed_user, "restart_policy": args.restart_policy, "omp_options": args.omp_option}
+        with store.transaction():
+            initial = _load(store, args.name)
+            changes = {key: {"from": getattr(initial, key), "to": value} for key, value in mutable.items() if value is not None and value != getattr(initial, key)}
+            if not changes:
+                raise CliError("no mutable changes requested", "validation", EXIT_VALIDATION)
+            proposed = Session(**dataclasses.asdict(initial))
+            for key, change in changes.items():
+                setattr(proposed, key, change["to"])
+            errors = validate_session(proposed)
+            if errors:
+                raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
+            definition = _definition(proposed, paths)
+            live = _owner_live(paths, proposed.name)
+            if args.dry_run:
+                _emit(args, {"dry_run": True, "changes": changes, "service_definition": definition, "active": live})
+                return EXIT_OK
+            if live and not args.apply_restart:
+                raise CliError("active session requires --apply-restart", "conflict", EXIT_CONFLICT)
+            expected_id = initial.id
+        backend = backend_for(root=paths.root)
+        service_path = backend.definition_path(initial.name) if not args.no_install else None
+        service_backup = service_path.read_bytes() if service_path is not None and service_path.exists() else None
+        service_install_attempted = False
+        if live:
+            backend.stop(initial.name)
+        before_apply: Optional[Session] = None
+        applied_bytes: Optional[bytes] = None
         try:
-            if live: backend.stop(session.name)
-            store.save(session)
-            if not args.no_install: backend.install(session.name, _runtime_command(session.name), session.cwd, session.restart_policy, activate=True)
-            if live: backend.start(session.name)
+            with store.transaction():
+                current = _load(store, args.name)
+                if current.id != expected_id:
+                    raise CliError("session identity changed during update", "conflict", EXIT_CONFLICT)
+                before_apply = Session(**dataclasses.asdict(current))
+                for key, change in changes.items():
+                    setattr(current, key, change["to"])
+                errors = validate_session(current)
+                if errors:
+                    raise CliError("; ".join(errors), "validation", EXIT_VALIDATION)
+                store.save(current)
+                session_path = paths.sessions / f"{current.name}.json"
+                applied_bytes = session_path.read_bytes()
+                if not live and not args.no_install:
+                    service_install_attempted = True
+                    backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
+            if live:
+                if not args.no_install:
+                    service_install_attempted = True
+                    backend.install(current.name, _runtime_command(current.name), current.cwd, current.restart_policy, activate=True)
+                backend.start(current.name)
         except Exception:
-            atomic_write(paths.sessions / f"{session.name}.json", old_data)
+            if before_apply is not None and applied_bytes is not None:
+                with store.transaction():
+                    session_path = paths.sessions / f"{before_apply.name}.json"
+                    if session_path.exists() and session_path.read_bytes() == applied_bytes:
+                        store.save(before_apply)
             try:
-                if not args.no_install: backend.install(old.name, _runtime_command(old.name), old.cwd, old.restart_policy, activate=True)
-                if live: backend.start(old.name)
-            except Exception: pass
+                if service_install_attempted and service_path is not None:
+                    if service_backup is None:
+                        backend.remove(initial.name)
+                        service_path.unlink(missing_ok=True)
+                    else:
+                        atomic_write(service_path, service_backup)
+                if live:
+                    backend.start(initial.name)
+            except Exception:
+                pass
             raise
-        _emit(args, {"updated": session.name, "changes": changes, "restarted": live}, f"Updated {session.name}"); return EXIT_OK
+        _emit(args, {"updated": current.name, "changes": changes, "restarted": live}, f"Updated {current.name}")
+        return EXIT_OK
     if args.command in {"stop", "restart"}:
         _load(store, args.name); backend = backend_for(root=paths.root); backend.stop(args.name)
         if args.command == "restart": backend.start(args.name)
         _emit(args, {"requested": args.command, "name": slug(args.name)}, f"{args.command.title()} requested for {slug(args.name)}"); return EXIT_OK
     if args.command == "remove":
-        session = _load(store, args.name); name = session.name; lock = paths.run / f"{name}.owner"
-        if _owner_live(paths, name): raise CliError(f"session still running: {name}", "conflict", EXIT_CONFLICT)
-        if not args.no_service:
-            backend = backend_for(root=paths.root); backend.stop(name); backend.remove(name)
-        for target in [paths.sessions / f"{name}.json", paths.run / f"{name}.omp-path", paths.run / f"{name}.runtime.json", paths.run / f"{name}.question.json"]: target.unlink(missing_ok=True)
-        lock.unlink(missing_ok=True); _emit(args, {"removed": name}, f"Removed {name}"); return EXIT_OK
+        with store.transaction():
+            session = _load(store, args.name)
+            name = session.name
+            lock = paths.run / f"{name}.owner"
+            if _owner_live(paths, name):
+                raise CliError(f"session still running: {name}", "conflict", EXIT_CONFLICT)
+            if not args.no_service:
+                backend = backend_for(root=paths.root)
+                backend.stop(name)
+                backend.remove(name)
+            for target in [paths.sessions / f"{name}.json", paths.run / f"{name}.omp-path", paths.run / f"{name}.runtime.json", paths.run / f"{name}.question.json"]:
+                target.unlink(missing_ok=True)
+            lock.unlink(missing_ok=True)
+        _emit(args, {"removed": name}, f"Removed {name}")
+        return EXIT_OK
     if args.command == "inbound":
         session = _load(store, args.name); event = {key: str(getattr(args, key)) for key in ("event_id", "question_id", "platform", "chat", "topic", "user", "answer")}; FileInbox(paths.inbox / session.name).submit(event); _emit(args, {"queued": True, "event_id": args.event_id, "validation": "runtime"}, f"Queued inbound {args.event_id}"); return EXIT_OK
     if args.command == "config":

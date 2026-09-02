@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,9 @@ def test_preinstall_write_failure_never_removes_service(
     removed: list[str] = []
 
     class Backend:
+        def definition_path(self, name):
+            return tmp_path / f"{name}.service"
+
         def remove(self, name):
             removed.append(name)
 
@@ -101,6 +105,78 @@ def test_preinstall_write_failure_never_removes_service(
 
     paths = Paths.discover()
     assert removed == []
+    assert not (paths.sessions / "demo.json").exists()
+    assert not (paths.run / "demo.omp-path").exists()
+
+
+def test_update_waits_for_replacement_and_merges_new_identity(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke(
+        tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path),
+        "--model", "old", "--mission", "original", "--omp-path", "/bin/true",
+        "--no-install",
+    )[0] == 0
+    paths = Paths.discover()
+    store = SessionStore(paths)
+    replacement = cli.Session.new(
+        name="demo", cwd=str(tmp_path), model="replacement", mission="replacement mission"
+    )
+    started = threading.Event()
+    finished = threading.Event()
+    results: list[int] = []
+
+    def update() -> None:
+        started.set()
+        results.append(cli.main([
+            "update", "demo", "--model", "updated", "--no-install", "--json",
+        ]))
+        finished.set()
+
+    with store.transaction():
+        worker = threading.Thread(target=update)
+        worker.start()
+        assert started.wait(1) and not finished.wait(0.1)
+        store.replace(replacement)
+    worker.join(2)
+
+    current = store.load("demo")
+    assert results == [0]
+    assert current.id == replacement.id
+    assert current.model == "updated"
+    assert current.mission == "replacement mission"
+
+
+def test_remove_waits_for_replacement_and_does_not_resurrect_state(
+    tmp_path: Path, capsys
+) -> None:
+    assert invoke(
+        tmp_path, capsys, "create", "demo", "--cwd", str(tmp_path),
+        "--model", "old", "--mission", "original", "--omp-path", "/bin/true",
+        "--no-install",
+    )[0] == 0
+    paths = Paths.discover()
+    store = SessionStore(paths)
+    replacement = cli.Session.new(
+        name="demo", cwd=str(tmp_path), model="replacement", mission="replacement mission"
+    )
+    started = threading.Event()
+    finished = threading.Event()
+    results: list[int] = []
+
+    def remove() -> None:
+        started.set()
+        results.append(cli.main(["remove", "demo", "--no-service", "--json"]))
+        finished.set()
+
+    with store.transaction():
+        worker = threading.Thread(target=remove)
+        worker.start()
+        assert started.wait(1) and not finished.wait(0.1)
+        store.replace(replacement)
+    worker.join(2)
+
+    assert results == [0]
     assert not (paths.sessions / "demo.json").exists()
     assert not (paths.run / "demo.omp-path").exists()
 
@@ -127,6 +203,7 @@ def test_doctor_is_structured_and_never_reads_secrets(tmp_path: Path, capsys, mo
 @pytest.mark.parametrize("command", ["create", "adopt"])
 def test_create_and_adopt_roll_back_state_when_service_install_fails(tmp_path: Path, capsys, monkeypatch, command: str) -> None:
     class BrokenBackend:
+        def definition_path(self, name): return tmp_path / f"{name}.service"
         def install(self,*args,**kwargs): raise subprocess.CalledProcessError(1,["install"])
         def remove(self,name): pass
     monkeypatch.setattr(cli,"backend_for",lambda **kwargs: BrokenBackend())

@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,59 @@ def test_migrates_v1_and_quarantines_partial_json(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="quarantined"):
         store.load("broken")
     assert list(paths.quarantine.glob("broken.*.json"))
+
+
+def test_session_patch_merges_owned_fields_and_rejects_stale_identity(tmp_path: Path) -> None:
+    store = SessionStore(Paths(tmp_path / "omp"))
+    session = Session.new(name="demo", cwd=str(tmp_path), model="old", mission="x")
+    store.save(session)
+
+    current = store.load("demo")
+    current.model = "new"
+    store.save(current)
+    patched = store.patch("demo", session.id, last_activity=123.0, status="running")
+    assert patched.model == "new"
+    assert (patched.last_activity, patched.status) == (123.0, "running")
+
+    replacement = Session.new(name="demo", cwd=str(tmp_path), model="replacement", mission="y")
+    store.save(replacement)
+    with pytest.raises(ValueError, match="identity changed"):
+        store.patch("demo", session.id, last_activity=456.0)
+    assert store.load("demo") == replacement
+
+    (store.paths.sessions / "demo.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        store.patch("demo", replacement.id, status="crashed")
+    assert not (store.paths.sessions / "demo.json").exists()
+
+
+def test_blocked_stale_patch_cannot_overwrite_replacement(tmp_path: Path) -> None:
+    store = SessionStore(Paths(tmp_path / "omp"))
+    original = Session.new(name="demo", cwd=str(tmp_path), model="old", mission="x")
+    replacement = Session.new(name="demo", cwd=str(tmp_path), model="replacement", mission="y")
+    store.save(original)
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def stale_patch() -> None:
+        started.set()
+        try:
+            store.patch("demo", original.id, last_activity=999.0)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with store.transaction():
+        worker = threading.Thread(target=stale_patch)
+        worker.start()
+        assert started.wait(1) and not finished.wait(0.1)
+        store.replace(replacement)
+    worker.join(1)
+
+    assert len(errors) == 1 and isinstance(errors[0], ValueError)
+    assert store.load("demo") == replacement
 
 
 def test_redacts_common_secrets_recursively() -> None:

@@ -202,11 +202,17 @@ git commit -m "fix: reap supervised OMP children on every exit"
 - Modify: `plugins/hermes-omp/tests/test_core.py`
 - Modify: `plugins/hermes-omp/tests/test_cli.py`
 - Modify: `plugins/hermes-omp/tests/test_release_features.py`
+- Modify: `plugins/hermes-omp/src/hermes_omp/runtime.py`
+- Modify: `plugins/hermes-omp/src/hermes_omp/service.py`
+- Modify: `plugins/hermes-omp/tests/test_runtime.py`
+- Modify: `plugins/hermes-omp/tests/test_bridge_service.py`
 
 **Interfaces:**
 - Produces: private `_path_lock(path: Path)` context manager using a per-path `threading.RLock` plus `fcntl.flock` or `msvcrt.locking`.
 - Produces: `SessionStore.create(session: Session) -> None`, which raises `FileExistsError` on an existing local name and `ValueError` on a duplicate OMP session ID.
 - Preserves: JSON session/outbox formats, existing `Outbox` method signatures, and public `.items` access as a fresh snapshot.
+- Requires: every session read-modify-write path (CLI update/remove and runtime-owned status/activity fields) participates in the store transaction or compare-and-swap, so a later stale save cannot overwrite a completed create/import/replace.
+- Requires: rollback snapshots the actual service definition file presence/bytes and restores that exact file state; absence of a prior service remains absence.
 
 - [ ] **Step 1: Add deterministic stale-writer queue regressions**
 

@@ -54,7 +54,9 @@ class Runtime:
         return frames
 
     def _touch(self, now: Optional[float]=None) -> None:
-        self.session.last_activity=time.time() if now is None else now; self.store.save(self.session)
+        stamp = time.time() if now is None else now
+        self.store.patch(self.session.name, self.session.id, last_activity=stamp)
+        self.session.last_activity = stamp
 
     def on_event(self,event:dict[str,Any],now:Optional[float]=None) -> Optional[dict[str,Any]]:
         self._touch(now)
@@ -345,9 +347,11 @@ def _add_exception_note(error: BaseException, note: str) -> None:
 
 
 def run(name: str, *, paths: Optional[Paths]=None) -> int:
-    paths=paths or Paths.discover(); store=SessionStore(paths); session=store.load(name)
-    lock=paths.run/f"{session.name}.owner"
-    fd,lock_token=acquire_owner_lock(lock,session.id)
+    paths=paths or Paths.discover(); store=SessionStore(paths)
+    with store.transaction():
+        session=store.load(name)
+        lock=paths.run/f"{session.name}.owner"
+        fd,lock_token=acquire_owner_lock(lock,session.id)
     child: Optional[subprocess.Popen[str]]=None
     selector: Optional[selectors.BaseSelector]=None
     line_buffer: Optional[RpcLineBuffer]=None
@@ -373,7 +377,8 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             except Exception as exc: outbox.fail(item.id,error=str(exc))
         child=subprocess.Popen(build_omp_command(session,runtime.omp_path),cwd=session.cwd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,start_new_session=True)
         _persist_child_owner(lock,session.id,lock_token,child.pid)
-        session.status="running"; session.supervisor_pid=os.getpid(); session.omp_pid=child.pid; store.save(session)
+        store.patch(session.name, session.id, status="running", supervisor_pid=os.getpid(), omp_pid=child.pid)
+        session.status="running"; session.supervisor_pid=os.getpid(); session.omp_pid=child.pid
         assert child.stdin and child.stdout
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
@@ -440,9 +445,11 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
         code=int(child.returncode or 0)
-        session.status="stopped" if stopping else ("completed" if code==0 else "crashed")
-        session.last_activity=time.time(); session.supervisor_pid=0; session.omp_pid=0
-        store.save(session); terminal_state_saved=True
+        terminal_status="stopped" if stopping else ("completed" if code==0 else "crashed")
+        terminal_activity=time.time()
+        store.patch(session.name, session.id, status=terminal_status, last_activity=terminal_activity, supervisor_pid=0, omp_pid=0)
+        session.status=terminal_status; session.last_activity=terminal_activity; session.supervisor_pid=0; session.omp_pid=0
+        terminal_state_saved=True
         return code
     except BaseException as exc:
         body_error=exc
@@ -473,10 +480,13 @@ def run(name: str, *, paths: Optional[Paths]=None) -> int:
             if child.stdin is not None:
                 cleanup(child.stdin.close)
         if child is not None and not terminal_state_saved:
-            session.status="crashed"; session.last_activity=time.time()
+            crashed_activity=time.time()
+            crashed_fields: dict[str, Any] = {"status": "crashed", "last_activity": crashed_activity}
+            session.status="crashed"; session.last_activity=crashed_activity
             if termination_error is None:
+                crashed_fields.update({"supervisor_pid": 0, "omp_pid": 0})
                 session.supervisor_pid=0; session.omp_pid=0
-            cleanup(lambda: store.save(session))
+            cleanup(lambda: store.patch(session.name, session.id, **crashed_fields))
         if termination_error is None:
             cleanup(lambda: release_owner_lock(lock,fd,lock_token))
         elif child is not None:

@@ -90,15 +90,21 @@ def _path_lock(path: Path):
                 depths.pop(key, None)
 
 
-def atomic_write(path: Path, data: str, mode: int = 0o600) -> None:
+def atomic_write(path: Path, data: Any, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+        if isinstance(data, bytes):
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
         os.replace(tmp, path)
         os.chmod(path, mode)
     finally:
@@ -218,30 +224,47 @@ class SessionStore:
             self.assert_unique_omp_id(session.omp_session_id, except_name=session.name)
             self.save(session)
 
+    def patch(self, name: str, expected_id: str, **owned_fields: Any) -> Session:
+        field_names = {field.name for field in dataclasses.fields(Session)}
+        invalid = sorted(set(owned_fields) - field_names)
+        if invalid:
+            raise ValueError(f"unknown session fields: {', '.join(invalid)}")
+        if "id" in owned_fields or "name" in owned_fields:
+            raise ValueError("session identity fields cannot be patched")
+        with self.transaction():
+            current = self.load(name)
+            if current.id != expected_id:
+                raise ValueError(f"session identity changed: {slug(name)}")
+            for field, value in owned_fields.items():
+                setattr(current, field, value)
+            self.save(current)
+            return current
+
     def save(self, session: Session) -> None:
-        atomic_write(self.paths.sessions / f"{slug(session.name)}.json", json.dumps(dataclasses.asdict(session), indent=2, sort_keys=True) + "\n")
+        with self.transaction():
+            atomic_write(self.paths.sessions / f"{slug(session.name)}.json", json.dumps(dataclasses.asdict(session), indent=2, sort_keys=True) + "\n")
 
     def load(self, name: str) -> Session:
-        path = self.paths.sessions / f"{slug(name)}.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raise
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            target = self.paths.quarantine / f"{path.stem}.{int(time.time_ns())}.json"
-            os.replace(path, target)
-            raise ValueError(f"corrupt state quarantined at {target}") from exc
-        version = int(data.get("schema_version", 1))
-        if version > SCHEMA_VERSION:
-            raise ValueError(f"unsupported schema version {version}")
-        if version == 1:
-            now = time.time()
-            defaults = dataclasses.asdict(Session.new(name=data["name"], cwd=data["cwd"], model=data.get("model", ""), mission=data.get("mission", "")))
-            defaults.update(data)
-            defaults["schema_version"] = SCHEMA_VERSION
-            data = defaults
-            self.save(Session(**data))
-        return Session(**data)
+        with self.transaction():
+            path = self.paths.sessions / f"{slug(name)}.json"
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                raise
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                target = self.paths.quarantine / f"{path.stem}.{int(time.time_ns())}.json"
+                os.replace(path, target)
+                raise ValueError(f"corrupt state quarantined at {target}") from exc
+            version = int(data.get("schema_version", 1))
+            if version > SCHEMA_VERSION:
+                raise ValueError(f"unsupported schema version {version}")
+            if version == 1:
+                defaults = dataclasses.asdict(Session.new(name=data["name"], cwd=data["cwd"], model=data.get("model", ""), mission=data.get("mission", "")))
+                defaults.update(data)
+                defaults["schema_version"] = SCHEMA_VERSION
+                data = defaults
+                self.save(Session(**data))
+            return Session(**data)
 
     def list(self) -> list[Session]:
         result = []

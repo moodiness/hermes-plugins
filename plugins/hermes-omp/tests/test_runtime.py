@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import hermes_omp.runtime as runtime_module
+import hermes_omp.cli as cli_module
 
 from hermes_omp.core import Paths, Session, SessionStore
 from hermes_omp.bridge import FileInbox, HermesSendBridge
@@ -388,6 +389,69 @@ def test_runtime_prepares_inbound_until_response_is_committed(tmp_path: Path) ->
     assert "e1" in runtime.seen
     assert runtime.session.last_activity == 3
     assert not (paths.run / "demo.question.json").exists()
+
+
+def test_runtime_touch_merges_activity_without_overwriting_config(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    store = SessionStore(paths)
+    session = Session.new(name="demo", cwd=str(tmp_path), model="old", mission="x")
+    store.save(session)
+    runtime = Runtime(session, paths, omp_path="fake")
+    updated = store.load("demo")
+    updated.model = "new"
+    store.save(updated)
+
+    runtime._touch(42.0)
+
+    persisted = store.load("demo")
+    assert persisted.model == "new"
+    assert persisted.last_activity == 42.0
+
+
+def test_runtime_startup_and_remove_share_identity_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    session = Session.new(name="demo", cwd=str(tmp_path), model="m", mission="x")
+    SessionStore(paths).save(session)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    startup_entered = threading.Event()
+    release_startup = threading.Event()
+    remove_finished = threading.Event()
+    outcomes: list[object] = []
+
+    def blocked_owner_lock(lock: Path, session_id: str):
+        startup_entered.set()
+        assert release_startup.wait(2)
+        raise RuntimeError("stop before spawn")
+
+    monkeypatch.setattr(runtime_module, "acquire_owner_lock", blocked_owner_lock)
+
+    def start_runtime() -> None:
+        try:
+            runtime_module.run("demo", paths=paths)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    def remove_session() -> None:
+        outcomes.append(cli_module.main(["remove", "demo", "--no-service"]))
+        remove_finished.set()
+
+    starter = threading.Thread(target=start_runtime)
+    remover = threading.Thread(target=remove_session)
+    starter.start()
+    assert startup_entered.wait(2)
+    remover.start()
+    remove_overlapped = remove_finished.wait(0.25)
+    release_startup.set()
+    starter.join(2)
+    remover.join(2)
+
+    assert not starter.is_alive() and not remover.is_alive()
+    assert not remove_overlapped
+    assert any(isinstance(result, RuntimeError) for result in outcomes)
+    assert 0 in outcomes
+    assert not (paths.sessions / "demo.json").exists()
 
 
 def test_commit_response_rejects_a_different_pending_question(tmp_path: Path) -> None:

@@ -20,6 +20,8 @@ class ServiceBackend(ABC):
     @abstractmethod
     def definition(self, name: str, command: list[str], cwd: str, restart_policy: str) -> Any: ...
     @abstractmethod
+    def definition_path(self, name: str) -> Path: ...
+    @abstractmethod
     def install(self, name: str, command: list[str], cwd: str, restart_policy: str, activate: bool = True) -> Path: ...
     @abstractmethod
     def start(self, name: str) -> None: ...
@@ -33,16 +35,16 @@ class LaunchdBackend(ServiceBackend):
     def definition(self, name, command, cwd, restart_policy):
         keep: Any = False if restart_policy == "never" else True if restart_policy == "always" else {"SuccessfulExit": False}
         return {"Label": LABEL_PREFIX + slug(name), "ProgramArguments": command, "WorkingDirectory": cwd, "EnvironmentVariables": {"HERMES_HOME": os.environ.get("HERMES_HOME", str(Path.home()/".hermes")), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, "RunAtLoad": False, "KeepAlive": keep, "ProcessType": "Background", "ThrottleInterval": 10, "StandardOutPath": str(self.root / "logs" / f"{slug(name)}.service.log"), "StandardErrorPath": str(self.root / "logs" / f"{slug(name)}.service.log")}
-    def _path(self, name): return Path.home()/"Library"/"LaunchAgents"/f"{LABEL_PREFIX}{slug(name)}.plist"
+    def definition_path(self, name): return Path.home()/"Library"/"LaunchAgents"/f"{LABEL_PREFIX}{slug(name)}.plist"
     def install(self, name, command, cwd, restart_policy, activate=True):
-        path=self._path(name); path.parent.mkdir(parents=True, exist_ok=True); atomic_write(path, plistlib.dumps(self.definition(name,command,cwd,restart_policy)).decode(), 0o600)
+        path=self.definition_path(name); path.parent.mkdir(parents=True, exist_ok=True); atomic_write(path, plistlib.dumps(self.definition(name,command,cwd,restart_policy)).decode(), 0o600)
         if activate:
             self.runner(["launchctl","bootstrap",f"gui/{os.getuid()}",str(path)],check=True)
         return path
     def start(self,name): self.runner(["launchctl","kickstart","-k",f"gui/{os.getuid()}/{LABEL_PREFIX}{slug(name)}"],check=True)
     def stop(self,name): self.runner(["launchctl","kill","SIGTERM",f"gui/{os.getuid()}/{LABEL_PREFIX}{slug(name)}"],check=False)
     def remove(self,name):
-        path=self._path(name); self.runner(["launchctl","bootout",f"gui/{os.getuid()}",str(path)],check=False)
+        path=self.definition_path(name); self.runner(["launchctl","bootout",f"gui/{os.getuid()}",str(path)],check=False)
         if path.exists(): path.unlink()
 
 
@@ -50,15 +52,15 @@ class SystemdBackend(ServiceBackend):
     def definition(self,name,command,cwd,restart_policy):
         restart={"never":"no","on-failure":"on-failure","always":"always"}[restart_policy]
         return f"[Unit]\nDescription=Hermes OMP session {slug(name)}\n\n[Service]\nType=simple\nWorkingDirectory={cwd}\nExecStart={shlex.join(command)}\nRestart={restart}\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
-    def _path(self,name): return Path.home()/".config"/"systemd"/"user"/f"hermes-omp-{slug(name)}.service"
+    def definition_path(self,name): return Path.home()/".config"/"systemd"/"user"/f"hermes-omp-{slug(name)}.service"
     def install(self,name,command,cwd,restart_policy,activate=True):
-        path=self._path(name); atomic_write(path,self.definition(name,command,cwd,restart_policy),0o600)
+        path=self.definition_path(name); atomic_write(path,self.definition(name,command,cwd,restart_policy),0o600)
         if activate: self.runner(["systemctl","--user","daemon-reload"],check=True)
         return path
     def start(self,name): self.runner(["systemctl","--user","start",f"hermes-omp-{slug(name)}.service"],check=True)
     def stop(self,name): self.runner(["systemctl","--user","stop",f"hermes-omp-{slug(name)}.service"],check=False)
     def remove(self,name):
-        self.stop(name); path=self._path(name)
+        self.stop(name); path=self.definition_path(name)
         if path.exists(): path.unlink()
         self.runner(["systemctl","--user","daemon-reload"],check=False)
 
@@ -68,9 +70,9 @@ class WindowsTaskBackend(ServiceBackend):
         args=" ".join(shlex.quote(x) for x in command[1:])
         restart="" if restart_policy=="never" else f"<RestartOnFailure><Interval>PT1M</Interval><Count>{'3' if restart_policy=='on-failure' else '999'}</Count></RestartOnFailure>"
         return f'''<?xml version="1.0" encoding="UTF-16"?><Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>{restart}</Settings><Actions Context="Author"><Exec><Command>{escape(command[0])}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(cwd)}</WorkingDirectory></Exec></Actions></Task>'''
-    def _path(self,name): return self.root/"services"/f"hermes-omp-{slug(name)}.xml"
+    def definition_path(self,name): return self.root/"services"/f"hermes-omp-{slug(name)}.xml"
     def install(self,name,command,cwd,restart_policy,activate=True):
-        path=self._path(name); atomic_write(path,self.definition(name,command,cwd,restart_policy),0o600)
+        path=self.definition_path(name); atomic_write(path,self.definition(name,command,cwd,restart_policy),0o600)
         if activate: self.runner(["schtasks","/Create","/TN",f"HermesOMP-{slug(name)}","/XML",str(path),"/F"],check=True)
         return path
     def start(self,name): self.runner(["schtasks","/Run","/TN",f"HermesOMP-{slug(name)}"],check=True)

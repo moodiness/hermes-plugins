@@ -60,3 +60,16 @@ def test_backend_selection() -> None:
     assert isinstance(backend_for("linux", Path("/tmp")), SystemdBackend)
     assert isinstance(backend_for("win32", Path("/tmp")), WindowsTaskBackend)
     with pytest.raises(ValueError): backend_for("plan9", Path("/tmp"))
+
+
+def test_backends_expose_their_definition_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert LaunchdBackend(tmp_path).definition_path("Demo") == (
+        tmp_path / "Library" / "LaunchAgents" / "ai.hermes.omp.demo.plist"
+    )
+    assert SystemdBackend(tmp_path).definition_path("Demo") == (
+        tmp_path / ".config" / "systemd" / "user" / "hermes-omp-demo.service"
+    )
+    assert WindowsTaskBackend(tmp_path).definition_path("Demo") == (
+        tmp_path / "services" / "hermes-omp-demo.xml"
+    )
