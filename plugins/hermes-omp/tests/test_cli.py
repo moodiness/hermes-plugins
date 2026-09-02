@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import hermes_omp.cli as cli
-from hermes_omp.cli import build_parser, main
+from hermes_omp.cli import build_parser, configure_parser, main
 from hermes_omp.service import SystemdBackend
 from hermes_omp.core import Paths, SessionStore
 
@@ -24,9 +24,25 @@ def invoke(tmp_path: Path, capsys, *args: str) -> tuple[int, str]:
 
 
 def test_cli_exposes_required_commands() -> None:
-    parser = build_parser()
-    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
-    assert {"doctor","create","adopt","list","status","send","logs","events","retry","export","import","update","stop","restart","remove","config","completion","run","inbound"} <= set(action.choices)
+    help_text = build_parser().format_help()
+    for command in {"doctor","create","adopt","list","status","send","logs","events","retry","export","import","update","stop","restart","remove","config","completion","run","inbound"}:
+        assert command in help_text
+
+
+def test_configure_parser_populates_supplied_parser_without_changing_prog() -> None:
+    parser = argparse.ArgumentParser(prog="hermes omp native")
+
+    configured = configure_parser(parser)
+
+    assert configured is parser
+    assert parser.prog == "hermes omp native"
+    args = parser.parse_args([
+        "logs", "demo", "--lines", "0", "--poll-interval", "0",
+        "--max-polls", "0",
+    ])
+    assert (args.lines, args.poll_interval, args.max_polls, args.follow) == (
+        0, 0.0, 0, False,
+    )
 
 
 def test_create_list_status_send_remove_without_activation(tmp_path: Path, capsys) -> None:

@@ -45,9 +45,9 @@ def _json(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="emit stable machine-readable JSON")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="hermes omp", description="Durable OMP supervision")
-    sub = p.add_subparsers(dest="command", required=True)
+def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.description = "Durable OMP supervision"
+    sub = parser.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); _json(doctor); doctor.add_argument("--fix", action="store_true"); doctor.add_argument("--dry-run", action="store_true")
     create = sub.add_parser("create"); create.add_argument("name"); create.add_argument("--cwd", required=True); create.add_argument("--model", required=True); create.add_argument("--mission", required=True); create.add_argument("--project", default=""); create.add_argument("--platform", default=""); create.add_argument("--chat", default=""); create.add_argument("--topic", default=""); create.add_argument("--allowed-user", action="append", default=[]); create.add_argument("--resume", default=""); create.add_argument("--restart-policy", choices=["never", "on-failure", "always"], default="on-failure"); create.add_argument("--omp-path", default="omp"); create.add_argument("--omp-option", action="append", default=[]); create.add_argument("--no-install", action="store_true"); create.add_argument("--start", action="store_true"); create.add_argument("--dry-run", action="store_true"); _json(create)
     adopt = sub.add_parser("adopt"); adopt.add_argument("name"); adopt.add_argument("--inspection", required=True); adopt.add_argument("--mission", required=True); adopt.add_argument("--platform", default=""); adopt.add_argument("--chat", default=""); adopt.add_argument("--topic", default=""); adopt.add_argument("--allowed-user", action="append", default=[]); adopt.add_argument("--restart-policy", choices=["never", "on-failure", "always"], default="on-failure"); adopt.add_argument("--omp-path", default="omp"); adopt.add_argument("--no-install", action="store_true"); adopt.add_argument("--start", action="store_true"); adopt.add_argument("--dry-run", action="store_true"); _json(adopt)
@@ -68,7 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     runner = sub.add_parser("run"); runner.add_argument("name")
     inbound = sub.add_parser("inbound"); inbound.add_argument("name"); _json(inbound)
     for field in ("event-id", "question-id", "platform", "chat", "topic", "user", "answer"): inbound.add_argument("--" + field, required=True)
-    return p
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    return configure_parser(argparse.ArgumentParser(prog="hermes omp"))
 
 
 def _runtime_command(session: Session) -> list[str]: return [sys.executable, "-m", "hermes_omp.runtime", session.name, "--expected-session-id", session.id]
@@ -486,27 +490,43 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
     return EXIT_USAGE
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def dispatch_namespace(
+    args: argparse.Namespace, paths: Optional[Paths] = None
+) -> int:
     try:
-        args = build_parser().parse_args(argv)
-        if args.command in {"create", "adopt"} and args.dry_run:
-            paths = Paths.discover()
-        elif args.command == "doctor":
-            paths = Paths.discover()
-        else:
-            paths = Paths.discover(); paths.ensure()
-        return _dispatch(args, paths)
+        active_paths = paths if paths is not None else Paths.discover()
+        if not (
+            args.command in {"create", "adopt"} and args.dry_run
+        ) and args.command != "doctor":
+            active_paths.ensure()
+        return _dispatch(args, active_paths)
     except CliError as exc:
-        json_mode = bool(argv and "--json" in argv)
-        payload = {"ok": False, "error": {"code": exc.code, "message": str(redact(str(exc)))}}
-        if json_mode: print(json.dumps(payload, indent=2, sort_keys=True))
-        else: print(f"error: {payload['error']['message']}", file=sys.stderr)
+        payload = {
+            "ok": False,
+            "error": {"code": exc.code, "message": str(redact(str(exc)))},
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"error: {payload['error']['message']}", file=sys.stderr)
         return exc.exit_code
     except (ValueError, FileNotFoundError) as exc:
-        json_mode = bool(argv and "--json" in argv); payload = {"ok": False, "error": {"code": "validation", "message": str(redact(str(exc)))}}
-        if json_mode: print(json.dumps(payload, indent=2, sort_keys=True))
-        else: print(f"error: {payload['error']['message']}", file=sys.stderr)
+        payload = {
+            "ok": False,
+            "error": {
+                "code": "validation",
+                "message": str(redact(str(exc))),
+            },
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"error: {payload['error']['message']}", file=sys.stderr)
         return EXIT_VALIDATION
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    return dispatch_namespace(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__": raise SystemExit(main())
