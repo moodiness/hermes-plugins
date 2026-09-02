@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -34,46 +35,146 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCK_DEPTH = threading.local()
 _LOCK_POLL_SECONDS = 0.01
-_LOCK_STALE_SECONDS = 300.0
 _LOCK_TIMEOUT_SECONDS = 30.0
 
 
 def _normalized_path(path: Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(path.expanduser())))
 
+def _windows_pid_alive(pid: int, *, kernel32=None, get_last_error=None) -> bool:
+    if pid <= 0:
+        return False
+    import ctypes
+    from ctypes import wintypes
 
-def _pid_is_alive(pid: int) -> bool:
+    kernel32 = kernel32 or ctypes.WinDLL("kernel32", use_last_error=True)
+    get_last_error = get_last_error or ctypes.get_last_error
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return get_last_error() != 87
+    try:
+        result = kernel32.WaitForSingleObject(handle, 0)
+        if result == 0:
+            return False
+        if result == 0x102:
+            return True
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
+    except (PermissionError, OSError):
         return True
-    except OSError:
-        return False
     return True
 
 
-def _remove_stale_lock(lock_path: Path) -> None:
+def _abandoned_legacy_lock_snapshot(
+    lock_path: Path,
+) -> tuple[os.stat_result, bytes] | None:
+    owner_path = lock_path / "owner.json"
     try:
-        owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+        directory = lock_path.lstat()
+        if not stat.S_ISDIR(directory.st_mode):
+            return None
+        entries = list(lock_path.iterdir())
+        if len(entries) != 1 or entries[0].name != owner_path.name:
+            return None
+        owner_bytes = owner_path.read_bytes()
+        owner = json.loads(owner_bytes)
         pid = int(owner["pid"])
         created_at = float(owner["created_at"])
+        token = owner["token"]
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        try:
-            created_at = lock_path.stat().st_mtime
-        except OSError:
-            return
-        pid = 0
-    if _pid_is_alive(pid) or time.time() - created_at <= _LOCK_STALE_SECONDS:
-        return
+        return None
+    if (
+        pid <= 0
+        or not math.isfinite(created_at)
+        or not isinstance(token, str)
+        or not token
+        or _pid_alive(pid)
+    ):
+        return None
+    return directory, owner_bytes
+
+
+def _remove_legacy_tombstone(tombstone: Path) -> None:
     try:
-        (lock_path / "owner.json").unlink(missing_ok=True)
-        lock_path.rmdir()
+        (tombstone / "owner.json").unlink()
+        tombstone.rmdir()
     except OSError:
         pass
+
+
+def _migrate_abandoned_legacy_lock(lock_path: Path, *, apply: bool) -> bool:
+    if _abandoned_legacy_lock_snapshot(lock_path) is None:
+        return False
+    if not apply:
+        return True
+
+    migration_guard = lock_path.parent / ".hermes-omp-legacy-lock-migration"
+    with _path_lock(migration_guard):
+        snapshot = _abandoned_legacy_lock_snapshot(lock_path)
+        if snapshot is None:
+            return False
+        directory, owner_bytes = snapshot
+        owner_path = lock_path / "owner.json"
+        try:
+            if not os.path.samestat(directory, lock_path.lstat()):
+                return False
+            if owner_path.read_bytes() != owner_bytes:
+                return False
+        except OSError:
+            return False
+
+        tombstone = lock_path.with_name(
+            f".{lock_path.name}.{secrets.token_hex(8)}.legacy"
+        )
+        try:
+            os.replace(lock_path, tombstone)
+        except OSError:
+            return False
+
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        except FileExistsError:
+            try:
+                replacement = lock_path.lstat()
+            except OSError:
+                replacement = None
+            if replacement is not None and stat.S_ISREG(replacement.st_mode):
+                _remove_legacy_tombstone(tombstone)
+                return True
+        except OSError:
+            pass
+        else:
+            os.close(fd)
+            _remove_legacy_tombstone(tombstone)
+            return True
+
+        try:
+            lock_path.lstat()
+        except FileNotFoundError:
+            try:
+                os.replace(tombstone, lock_path)
+            except OSError:
+                pass
+        return False
 
 
 @contextlib.contextmanager
@@ -95,39 +196,65 @@ def _path_lock(path: Path):
 
             lock_path = path.with_name(path.name + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
-            token = secrets.token_hex(16)
             deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
             while True:
                 try:
-                    lock_path.mkdir()
-                except FileExistsError:
-                    _remove_stale_lock(lock_path)
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"timed out waiting for lock: {lock_path}")
-                    time.sleep(_LOCK_POLL_SECONDS)
-                    continue
-                try:
-                    atomic_write(
-                        lock_path / "owner.json",
-                        json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": token}) + "\n",
-                    )
-                except BaseException:
+                    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                except OSError as error:
                     try:
-                        lock_path.rmdir()
-                    except OSError:
-                        pass
-                    raise
+                        is_legacy_directory = stat.S_ISDIR(lock_path.lstat().st_mode)
+                    except FileNotFoundError:
+                        is_legacy_directory = True
+                    if not is_legacy_directory:
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"timed out waiting for lock: {lock_path}"
+                        ) from error
+                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+                    continue
                 break
+            locked = False
             try:
+                while True:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    try:
+                        if os.name == "nt":
+                            import msvcrt
+
+                            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as error:
+                        if error.errno not in (errno.EACCES, errno.EAGAIN):
+                            raise
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                f"timed out waiting for lock: {lock_path}"
+                            ) from error
+                        time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+                    else:
+                        locked = True
+                        break
                 yield
             finally:
                 try:
-                    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
-                    if owner.get("token") == token:
-                        (lock_path / "owner.json").unlink(missing_ok=True)
-                        lock_path.rmdir()
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    pass
+                    if locked:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        if os.name == "nt":
+                            import msvcrt
+
+                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
         finally:
             if depth:
                 depths[key] = depth

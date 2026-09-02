@@ -23,6 +23,18 @@ def test_release_version_is_consistent_across_public_surfaces() -> None:
     assert "version: 0.3.0rc1" in (root / "skills" / "omp-service" / "SKILL.md").read_text()
 
 
+def test_vendored_package_matches_installable_source() -> None:
+    root = Path(__file__).parents[1]
+    source = root / "src" / "hermes_omp"
+    vendored = root / "plugin" / "hermes_omp"
+    source_files = {path.name for path in source.glob("*.py")}
+    vendored_files = {path.name for path in vendored.glob("*.py")}
+
+    assert vendored_files == source_files
+    for name in sorted(source_files):
+        assert (vendored / name).read_bytes() == (source / name).read_bytes(), name
+
+
 def test_developer_install_bootstraps_a_pep_660_capable_pip() -> None:
     root=Path(__file__).parents[1]
     readme=(root/"README.md").read_text()

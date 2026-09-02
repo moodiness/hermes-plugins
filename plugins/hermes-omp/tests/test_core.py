@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-import multiprocessing
 import os
+import subprocess
 import stat
+import sys
 import time
 import threading
 from pathlib import Path
 
 import pytest
+import hermes_omp.cli as cli
 import hermes_omp.core as core
 
 from hermes_omp.core import (
@@ -246,91 +248,415 @@ def test_stale_writer_does_not_overwrite_malformed_queue(tmp_path: Path) -> None
     assert path.read_bytes() == b"{not-json"
 
 
-def _hold_path_lock(path: str, acquired, release) -> None:
-    with core._path_lock(Path(path)):
-        acquired.set()
-        release.wait(5)
+_PATH_LOCK_WORKER = """
+import sys
+import time
+from pathlib import Path
 
+from hermes_omp import core
 
-def _acquire_path_lock(path: str, acquired) -> None:
-    with core._path_lock(Path(path)):
-        acquired.set()
-
-
-def test_path_lock_excludes_other_processes_and_releases(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("spawn")
-    path = tmp_path / "queue.json"
-    first_acquired = context.Event()
-    second_acquired = context.Event()
-    release_first = context.Event()
-    first = context.Process(
-        target=_hold_path_lock, args=(str(path), first_acquired, release_first)
+target = Path(sys.argv[1])
+acquired = Path(sys.argv[2])
+release = sys.argv[3]
+lock_timeout = sys.argv[4]
+if lock_timeout != "-":
+    core._LOCK_TIMEOUT_SECONDS = float(lock_timeout)
+acquired.with_name(acquired.name + ".attempting").write_text(
+    "attempting\\n", encoding="utf-8"
+)
+try:
+    with core._path_lock(target):
+        acquired.write_text("acquired\\n", encoding="utf-8")
+        if release != "-":
+            deadline = time.monotonic() + 15
+            release_path = Path(release)
+            while not release_path.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out waiting for test release")
+                time.sleep(0.01)
+except TimeoutError as error:
+    if not str(error).startswith("timed out waiting for lock:"):
+        raise
+    acquired.with_name(acquired.name + ".timed-out").write_text(
+        "timed out\\n", encoding="utf-8"
     )
-    second = context.Process(target=_acquire_path_lock, args=(str(path), second_acquired))
-    first.start()
+"""
+
+
+def _spawn_path_lock_worker(
+    path: Path,
+    acquired: Path,
+    release: Path | None = None,
+    *,
+    module_root: Path | None = None,
+    lock_timeout: float | None = None,
+) -> subprocess.Popen[str]:
+    env = dict(os.environ)
+    if module_root is not None:
+        env["PYTHONPATH"] = str(module_root)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _PATH_LOCK_WORKER,
+            str(path),
+            str(acquired),
+            "-" if release is None else str(release),
+            "-" if lock_timeout is None else str(lock_timeout),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wait_for_path(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.01)
+    return path.exists()
+
+def _assert_worker_reached(
+    process: subprocess.Popen[str], path: Path, message: str, timeout: float = 5.0
+) -> None:
+    if _wait_for_path(path, timeout):
+        return
+    if process.poll() is None:
+        process.kill()
+    stdout, stderr = process.communicate(timeout=5)
+    raise AssertionError(
+        f"{message}; returncode={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+    )
+
+
+def _assert_process_ok(process: subprocess.Popen[str], timeout: float = 5.0) -> None:
     try:
-        assert first_acquired.wait(5)
-        second.start()
-        assert not second_acquired.wait(0.2)
-        release_first.set()
-        assert second_acquired.wait(5)
-    finally:
-        release_first.set()
-        first.join(5)
-        if second.pid is not None:
-            second.join(5)
-        if first.is_alive():
-            first.terminate()
-        if second.pid is not None and second.is_alive():
-            second.terminate()
-    assert first.exitcode == 0
-    assert second.exitcode == 0
-    assert not path.with_name("queue.json.lock").exists()
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        stdout, stderr = process.communicate(timeout=5)
+        raise AssertionError(
+            f"subprocess did not exit; stdout={stdout!r}, stderr={stderr!r}"
+        ) from error
+    assert process.returncode == 0, stderr or stdout
 
 
-def test_path_lock_recovers_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = tmp_path / "queue.json"
-    lock_path = path.with_name("queue.json.lock")
-    lock_path.mkdir()
-    (lock_path / "owner.json").write_text(
-        json.dumps({"pid": 99999999, "created_at": 0, "token": "stale"})
-    )
-    monkeypatch.setattr(core, "_LOCK_STALE_SECONDS", 0)
-
-    with core._path_lock(path):
-        owner = json.loads((lock_path / "owner.json").read_text())
-        assert owner["token"] != "stale"
-
-    assert not lock_path.exists()
+def _cleanup_processes(processes: list[subprocess.Popen[str]]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.kill()
+    for process in processes:
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
 
 
-def test_path_lock_times_out_while_another_owner_is_live(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_path_lock_excludes_other_processes_without_replacing_guard(
+    tmp_path: Path,
 ) -> None:
     path = tmp_path / "queue.json"
     lock_path = path.with_name("queue.json.lock")
+    first_ready = tmp_path / "first-ready"
+    blocked_ready = tmp_path / "blocked-ready"
+    after_release_ready = tmp_path / "after-release-ready"
+    release_first = tmp_path / "release-first"
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        first = _spawn_path_lock_worker(path, first_ready, release_first)
+        processes.append(first)
+        _assert_worker_reached(
+            first, first_ready, "first subprocess never acquired the lock"
+        )
+        assert lock_path.is_file()
+        guard = lock_path.stat()
+
+        blocked = _spawn_path_lock_worker(
+            path, blocked_ready, lock_timeout=0.1
+        )
+        processes.append(blocked)
+        _assert_worker_reached(
+            blocked,
+            blocked_ready.with_name(blocked_ready.name + ".timed-out"),
+            "contending subprocess did not time out",
+        )
+        _assert_process_ok(blocked)
+        assert not blocked_ready.exists()
+        assert first.poll() is None
+
+        release_first.touch()
+        _assert_process_ok(first)
+        after_release = _spawn_path_lock_worker(path, after_release_ready)
+        processes.append(after_release)
+        _assert_worker_reached(
+            after_release,
+            after_release_ready,
+            "subprocess never acquired the released lock",
+        )
+        _assert_process_ok(after_release)
+    finally:
+        _cleanup_processes(processes)
+
+    assert lock_path.is_file()
+    assert os.path.samestat(guard, lock_path.stat())
+
+
+def test_path_lock_recovers_after_owner_process_crashes(tmp_path: Path) -> None:
+    path = tmp_path / "queue.json"
+    first_ready = tmp_path / "first-ready"
+    never_release = tmp_path / "never-release"
+    recovered = tmp_path / "recovered"
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        first = _spawn_path_lock_worker(path, first_ready, never_release)
+        processes.append(first)
+        _assert_worker_reached(
+            first, first_ready, "crashing subprocess never acquired the lock"
+        )
+        guard = path.with_name("queue.json.lock").stat()
+        first.kill()
+        first.communicate(timeout=5)
+        assert first.returncode != 0
+
+        second = _spawn_path_lock_worker(path, recovered)
+        processes.append(second)
+        _assert_worker_reached(
+            second, recovered, "dead owner lock was not recovered"
+        )
+        _assert_process_ok(second)
+    finally:
+        _cleanup_processes(processes)
+    assert os.path.samestat(guard, path.with_name("queue.json.lock").stat())
+
+    assert path.with_name("queue.json.lock").is_file()
+
+
+def test_doctor_migrates_abandoned_legacy_path_lock(tmp_path: Path) -> None:
+    paths = Paths(tmp_path / "omp")
+    paths.ensure()
+    path = paths.run / "queue.json"
+    lock_path = path.with_name("queue.json.lock")
+    dead_owner = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _assert_process_ok(dead_owner)
     lock_path.mkdir()
     (lock_path / "owner.json").write_text(
-        json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": "live"})
+        json.dumps(
+            {
+                "pid": dead_owner.pid,
+                "created_at": time.time(),
+                "token": "legacy",
+            }
+        ),
+        encoding="utf-8",
     )
-    monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0)
 
-    with pytest.raises(TimeoutError, match="timed out waiting for lock"):
-        with core._path_lock(path):
-            pass
+    preview = cli.doctor(paths)
+    preview_repair = next(
+        item
+        for item in preview["repairs"]
+        if item["action"] == "migrate_legacy_path_lock"
+    )
+    assert preview_repair == {
+        "action": "migrate_legacy_path_lock",
+        "path": str(lock_path),
+        "applied": False,
+    }
+    assert lock_path.is_dir()
+
+    report = cli.doctor(paths, fix=True)
+
+    repair = next(
+        item
+        for item in report["repairs"]
+        if item["action"] == "migrate_legacy_path_lock"
+    )
+    assert repair == {
+        "action": "migrate_legacy_path_lock",
+        "path": str(lock_path),
+        "applied": True,
+    }
+    with core._path_lock(path):
+        assert lock_path.is_file()
+
+
+def test_doctor_does_not_disturb_live_legacy_path_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    paths.ensure()
+    path = paths.run / "queue.json"
+    lock_path = path.with_name("queue.json.lock")
+    live_owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(15)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": live_owner.pid,
+                "created_at": time.time(),
+                "token": "legacy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    try:
+        report = cli.doctor(paths, fix=True)
+        repair = next(
+            item
+            for item in report["repairs"]
+            if item["action"] == "migrate_legacy_path_lock"
+        )
+        assert repair == {
+            "action": "migrate_legacy_path_lock",
+            "path": str(lock_path),
+            "applied": False,
+            "reason": "live_or_unverifiable_owner",
+        }
+        with pytest.raises(TimeoutError, match="timed out waiting for lock"):
+            with core._path_lock(path):
+                pass
+        assert live_owner.poll() is None
+    finally:
+        _cleanup_processes([live_owner])
 
     assert lock_path.is_dir()
-    assert json.loads((lock_path / "owner.json").read_text())["token"] == "live"
 
 
-def test_path_lock_release_does_not_delete_another_owners_lock(tmp_path: Path) -> None:
+def test_doctor_requires_every_session_stopped_before_legacy_migration(
+    tmp_path: Path,
+) -> None:
+    paths = Paths(tmp_path / "omp")
+    paths.ensure()
+    lock_path = paths.sessions / ".store.lock"
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": 99999999,
+                "created_at": time.time(),
+                "token": "legacy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(15)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    (paths.run / "active.owner").write_text(
+        json.dumps({"pid": live_owner.pid, "token": "active"}),
+        encoding="utf-8",
+    )
+    try:
+        report = cli.doctor(paths, fix=True)
+        repair = next(
+            item
+            for item in report["repairs"]
+            if item["action"] == "migrate_legacy_path_lock"
+        )
+        assert repair["applied"] is False
+        assert repair["reason"] == "live_writer"
+        assert lock_path.is_dir()
+    finally:
+        _cleanup_processes([live_owner])
+
+
+def test_path_lock_times_out_without_disturbing_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "queue.json"
-    lock_path = path.with_name("queue.json.lock")
+    first_ready = tmp_path / "first-ready"
+    release_first = tmp_path / "release-first"
+    first = _spawn_path_lock_worker(path, first_ready, release_first)
+    try:
+        _assert_worker_reached(first, first_ready, "subprocess never acquired the lock")
+        monkeypatch.setattr(core, "_LOCK_TIMEOUT_SECONDS", 0.05)
 
-    with core._path_lock(path):
-        (lock_path / "owner.json").write_text(
-            json.dumps({"pid": os.getpid(), "created_at": time.time(), "token": "replacement"})
+        with pytest.raises(TimeoutError, match="timed out waiting for lock"):
+            with core._path_lock(path):
+                pass
+
+        assert first.poll() is None
+        release_first.touch()
+        _assert_process_ok(first)
+    finally:
+        _cleanup_processes([first])
+
+
+def test_source_and_vendored_path_locks_exclude_each_other(tmp_path: Path) -> None:
+    path = tmp_path / "queue.json"
+    source_ready = tmp_path / "source-ready"
+    blocked_ready = tmp_path / "vendored-blocked-ready"
+    after_release_ready = tmp_path / "vendored-after-release-ready"
+    release_source = tmp_path / "release-source"
+    plugin_root = Path(__file__).parents[1] / "plugin"
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        source = _spawn_path_lock_worker(path, source_ready, release_source)
+        processes.append(source)
+        _assert_worker_reached(
+            source, source_ready, "source subprocess never acquired the lock"
         )
 
-    assert lock_path.is_dir()
-    assert json.loads((lock_path / "owner.json").read_text())["token"] == "replacement"
+        blocked = _spawn_path_lock_worker(
+            path,
+            blocked_ready,
+            module_root=plugin_root,
+            lock_timeout=0.1,
+        )
+        processes.append(blocked)
+        _assert_worker_reached(
+            blocked,
+            blocked_ready.with_name(blocked_ready.name + ".timed-out"),
+            "vendored subprocess did not time out on the source lock",
+        )
+        _assert_process_ok(blocked)
+        assert not blocked_ready.exists()
+        assert source.poll() is None
+
+        release_source.touch()
+        _assert_process_ok(source)
+        after_release = _spawn_path_lock_worker(
+            path, after_release_ready, module_root=plugin_root
+        )
+        processes.append(after_release)
+        _assert_worker_reached(
+            after_release,
+            after_release_ready,
+            "vendored subprocess never acquired the released lock",
+        )
+        _assert_process_ok(after_release)
+    finally:
+        _cleanup_processes(processes)
+
+
+def test_path_lock_is_reentrant_and_remains_usable_after_exception(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "queue.json"
+
+    with pytest.raises(RuntimeError, match="inside lock"):
+        with core._path_lock(path):
+            with core._path_lock(path):
+                raise RuntimeError("inside lock")
+
+    with core._path_lock(path):
+        pass
+
+    assert path.with_name("queue.json.lock").is_file()
