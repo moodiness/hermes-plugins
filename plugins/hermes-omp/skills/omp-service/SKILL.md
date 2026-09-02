@@ -50,6 +50,7 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 
 1. Run doctor and list; confirm dependencies and no duplicate owner.
 2. Create with explicit cwd, model, mission, route, allowed user, and restart policy; confirm state is `created`.
+   Select notification kinds and local duration/restart budgets explicitly. Treat nonzero token/cost caps as unavailable and fail closed until status identifies trustworthy public RPC usage.
 3. Start through the installed user service; confirm one supervisor and one OMP PID.
 4. For an OMP question, preserve its correlation ID and route the answer through the configured public inbound adapter.
 5. Stop gracefully and verify the named process is inactive before removal.
@@ -64,6 +65,7 @@ Invoke `terminal(command="hermes omp doctor --json")`. Proceed only when `ok` is
 - Session archives remain sensitive. HMAC-SHA256 can detect modification but does not encrypt; pass key material only by `--hmac-key-file` or `--hmac-key-env` reference.
 - `balanced` and `night` policies can automatically answer only recommended reversible choices classified safe. Sensitive actions remain explicit under every profile.
 - RC1 validates the runtime on macOS only; Linux and Windows backends are definition-tested.
+- Transition logs are bounded redacted local NDJSON; no telemetry is sent. The Desktop dashboard is opt-in and read-only by default; confirmed actions must use its validated CLI contract.
 
 ## Verification
 

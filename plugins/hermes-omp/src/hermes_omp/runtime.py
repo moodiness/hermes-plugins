@@ -37,7 +37,7 @@ def inspect_adoption(argv: list[str], cwd: str) -> dict[str, str]:
 
 
 class Runtime:
-    def __init__(self, session: Session, paths: Paths, *, omp_path: str, question_ttl: float = 86400, auto_answer_safe: bool = False):
+    def __init__(self, session: Session, paths: Paths, *, omp_path: str, question_ttl: float = 86400, auto_answer_safe: bool = False, started_at: Optional[float] = None, usage_rpc_trustworthy: bool = False, transition_max_bytes: int = 262144):
         self.session, self.paths, self.omp_path = session, paths, omp_path
         self.store = SessionStore(paths); self.question_ttl=question_ttl; self.auto_answer_safe=auto_answer_safe or session.policy_profile in {"balanced", "night"}
         state_path=paths.run/f"{session.name}.runtime.json"
@@ -46,9 +46,81 @@ class Runtime:
         self.question: Optional[Question] = Question.from_dict(question) if question else None
         self.seen: set[str] = set(str(x) for x in state.get("seen_event_ids",[]))
         self.auth=Authorization(session.platform,session.chat,session.topic,tuple(session.allowed_users))
+        self.started_at=time.time() if started_at is None else started_at
+        self.usage_rpc_trustworthy=usage_rpc_trustworthy
+        self.transition_max_bytes=max(256, transition_max_bytes)
+        self.telemetry_enabled=False
+        self.notified=set(str(x) for x in state.get("notified",[]))
+        self.restarts=[float(x) for x in state.get("restarts",[])]
+        usage=state.get("usage",{})
+        self.usage={"total_tokens":int(usage.get("total_tokens",0)),"cost_usd":float(usage.get("cost_usd",0.0))}
+        if started_at is None:
+            self.started_at=float(state.get("started_at",self.started_at))
 
     def _save_state(self) -> None:
-        atomic_write(self.state_path,json.dumps({"question":self.question.to_dict() if self.question else None,"seen_event_ids":sorted(self.seen)},indent=2)+"\n")
+        atomic_write(self.state_path,json.dumps({"question":self.question.to_dict() if self.question else None,"seen_event_ids":sorted(self.seen),"notified":sorted(self.notified),"restarts":self.restarts,"usage":self.usage,"started_at":self.started_at},indent=2)+"\n")
+
+    def notification(self, kind: str, key: str, text: str) -> Optional[dict[str, Any]]:
+        if kind not in self.session.notifications or not self.session.notifications[kind]: return None
+        fingerprint=hashlib.sha256(f"{kind}\0{key}".encode()).hexdigest()[:24]
+        if fingerprint in self.notified: return None
+        return {"event_id":f"notification-{kind}-{fingerprint}","platform":self.session.platform,"chat":self.session.chat,"topic":self.session.topic,"text":str(redact(text))[:4000],"kind":kind,"dedup_key":fingerprint}
+
+    def commit_notification(self, fingerprint: str) -> None:
+        self.notified.add(str(fingerprint)); self._save_state()
+
+    def queue_notification(self, fingerprint: str) -> None:
+        self.notified.add(str(fingerprint)); self._save_state()
+
+    def restart_status(self, now: Optional[float]=None) -> dict[str, Any]:
+        stamp=time.time() if now is None else now
+        window=self.session.restart_window_seconds
+        recent=[value for value in self.restarts if not window or stamp-value <= window]
+        cooldown_remaining=max(0.0, (recent[-1]+self.session.restart_cooldown_seconds-stamp) if recent else 0.0)
+        limit_reached=bool(self.session.max_restarts and len(recent)>=self.session.max_restarts)
+        return {"allowed":not limit_reached and cooldown_remaining<=0,"count":len(recent),"limit":self.session.max_restarts,"window_seconds":window,"cooldown_remaining_seconds":cooldown_remaining}
+
+    def record_restart(self, now: Optional[float]=None) -> dict[str, Any]:
+        stamp=time.time() if now is None else now
+        status=self.restart_status(stamp)
+        if status["allowed"]:
+            self.restarts=[value for value in self.restarts if not self.session.restart_window_seconds or stamp-value<=self.session.restart_window_seconds]
+            self.restarts.append(stamp); self._save_state()
+        return status
+
+    def budget_status(self, now: Optional[float]=None) -> dict[str, Any]:
+        stamp=time.time() if now is None else now
+        elapsed=max(0.0,stamp-self.started_at)
+        duration={"state":"unlimited" if not self.session.max_duration_seconds else ("exceeded" if elapsed>self.session.max_duration_seconds else "within_limit"),"elapsed_seconds":elapsed,"limit":self.session.max_duration_seconds}
+        unavailable={"state":"unavailable","enforceable":False,"reason":"trustworthy_public_rpc_usage_unavailable"}
+        if self.usage_rpc_trustworthy:
+            tokens={"state":"unlimited" if not self.session.max_tokens else ("exceeded" if self.usage["total_tokens"]>self.session.max_tokens else "within_limit"),"enforceable":True,"used":self.usage["total_tokens"],"limit":self.session.max_tokens}
+            cost={"state":"unlimited" if not self.session.max_cost_usd else ("exceeded" if self.usage["cost_usd"]>self.session.max_cost_usd else "within_limit"),"enforceable":True,"used":self.usage["cost_usd"],"limit":self.session.max_cost_usd}
+        else:
+            tokens=dict(unavailable) if self.session.max_tokens else {"state":"unlimited","enforceable":False}
+            cost=dict(unavailable) if self.session.max_cost_usd else {"state":"unlimited","enforceable":False}
+        return {"duration":duration,"tokens":tokens,"cost":cost,"restart":self.restart_status(stamp)}
+
+    def should_start(self) -> bool:
+        status=self.budget_status()
+        return status["tokens"]["state"]!="unavailable" and status["cost"]["state"]!="unavailable"
+
+    def should_stop(self, now: Optional[float]=None) -> str:
+        status=self.budget_status(now)
+        if status["duration"]["state"]=="exceeded": return "duration_exceeded"
+        if status["tokens"]["state"]=="exceeded": return "token_limit_exceeded"
+        if status["cost"]["state"]=="exceeded": return "cost_limit_exceeded"
+        return ""
+
+    def transition(self, previous: str, current: str, details: dict[str, Any], *, now: Optional[float]=None) -> None:
+        path=self.paths.logs/f"{self.session.name}.transitions.ndjson"; path.parent.mkdir(parents=True,exist_ok=True)
+        record={"timestamp":time.time() if now is None else now,"session":self.session.name,"from":previous,"to":current,"reason":str(redact(details.get("reason",current)))[:256],"details":redact(details)}
+        line=json.dumps(record,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n"
+        existing=path.read_text(encoding="utf-8") if path.exists() else ""
+        combined=(existing+line).encode("utf-8")
+        while len(combined)>self.transition_max_bytes and "\n" in combined.decode("utf-8",errors="ignore"):
+            text=combined.decode("utf-8",errors="ignore"); combined=text.split("\n",1)[1].encode("utf-8")
+        atomic_write(path,combined)
 
     def startup_frames(self) -> list[dict[str, Any]]:
         frames=[{"type":"negotiate_protocol","protocolVersion":2,"id":"negotiate"}]
@@ -62,6 +134,8 @@ class Runtime:
 
     def on_event(self,event:dict[str,Any],now:Optional[float]=None) -> Optional[dict[str,Any]]:
         self._touch(now)
+        if event.get("type")=="usage" and self.usage_rpc_trustworthy and event.get("source")=="public_rpc":
+            self.usage={"total_tokens":int(event.get("total_tokens",0)),"cost_usd":float(event.get("cost_usd",0.0))}; self._save_state(); return None
         if event.get("type") != "extension_ui_request" or event.get("method","select") not in {"select","confirm","input","ask"}: return None
         self.question=Question.from_event(event,self.session.name,self.question_ttl,now)
         self._save_state(); atomic_write(self.paths.run/f"{self.session.name}.question.json",json.dumps(self.question.to_dict())+"\n")
@@ -347,12 +421,15 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
         stopping=True
 
     signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
-    outbox=Outbox(paths.outbox/f"{session.name}.json"); inbox=FileInbox(paths.inbox/session.name)
+    outbox_path=paths.outbox/f"{session.name}.json"
+    outbox=Outbox(outbox_path); inbox=FileInbox(paths.inbox/session.name)
     bridge_environment=dict(os.environ); bridge_environment["HERMES_HOME"]=str(paths.root.parent)
     bridge=HermesSendBridge(hermes=os.environ.get("HERMES_OMP_HERMES","hermes"),environ=bridge_environment)
     runtime_path = paths.run / f"{name}.omp-path"
     configured_path = runtime_path.read_text().strip() if runtime_path.exists() else ""
     runtime=Runtime(session,paths,omp_path=os.environ.get("HERMES_OMP_BINARY", configured_path or "omp"),auto_answer_safe=os.environ.get("HERMES_OMP_AUTO_ANSWER_SAFE")=="1")
+    if not runtime.should_start():
+        raise RuntimeError("configured token/cost cap cannot be enforced: trustworthy public OMP RPC usage is unavailable")
 
     log_path=paths.logs/f"{session.name}.jsonl"; event_log=StructuredLog(log_path)
     try:
@@ -364,12 +441,17 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
         _persist_child_owner(lock,session.id,lock_token,child.pid)
         store.patch(session.name, session.id, status="running", supervisor_pid=os.getpid(), omp_pid=child.pid)
         session.status="running"; session.supervisor_pid=os.getpid(); session.omp_pid=child.pid
+        runtime.transition("created","running",{"reason":"process_started","pid":child.pid})
         assert child.stdin and child.stdout
         for frame in runtime.startup_frames(): child.stdin.write(json.dumps(frame)+"\n")
         child.stdin.flush(); selector=selectors.DefaultSelector(); selector.register(child.stdout,selectors.EVENT_READ)
         line_buffer=RpcLineBuffer()
         child_cleaned=False
         while not child_cleaned or selector.get_map():
+            budget_reason=runtime.should_stop()
+            if budget_reason:
+                runtime.transition("running","stopping",{"reason":budget_reason})
+                stopping=True
             if not child_cleaned and (stopping or _child_exited_unreaped(child)):
                 _terminate_child(child)
                 child_cleaned=True
@@ -390,10 +472,16 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
                             except (BrokenPipeError,OSError):
                                 continue
                             runtime.commit_response(str(action["question_id"]))
-                        elif action: outbox.enqueue(action["event_id"],action)
+                        elif action:
+                            if session.notifications.get("question",True): outbox.enqueue(action["event_id"],action)
                         text=_event_text(event)
                         if text:
-                            eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; outbox.enqueue(eid,{"platform":session.platform,"chat":session.chat,"topic":session.topic,"text":text[:4000]})
+                            eid="progress-"+hashlib.sha256(text.encode()).hexdigest()[:24]; notification=runtime.notification("milestone",eid,text)
+                            if notification:
+                                deliverable={key:value for key,value in notification.items() if key != "dedup_key"}
+                                try: bridge.deliver(deliverable); runtime.commit_notification(notification["dedup_key"])
+                                except Exception:
+                                    if outbox.enqueue(deliverable["event_id"],deliverable): runtime.queue_notification(notification["dedup_key"])
                     break
             prompts=Outbox(paths.run/f"{session.name}.prompts.json")
             for item in prompts.due():
@@ -430,11 +518,22 @@ def run(name: str, *, paths: Optional[Paths]=None, expected_session_id: str="") 
             try: bridge.deliver(item.payload); outbox.ack(item.id)
             except Exception as exc: outbox.fail(item.id,error=str(exc))
         code=int(child.returncode or 0)
-        terminal_status="stopped" if stopping else ("completed" if code==0 else "crashed")
+        budget_stop=bool(runtime.should_stop())
+        terminal_status="budget_exceeded" if budget_stop else ("stopped" if stopping else ("completed" if code==0 else "crashed"))
         terminal_activity=time.time()
         store.patch(session.name, session.id, status=terminal_status, last_activity=terminal_activity, supervisor_pid=0, omp_pid=0)
         session.status=terminal_status; session.last_activity=terminal_activity; session.supervisor_pid=0; session.omp_pid=0
+        runtime.transition("running",terminal_status,{"reason":"process_exit","code":code})
+        kind="completion" if terminal_status=="completed" else "error"
+        notification=runtime.notification(kind,f"exit-{code}-{terminal_status}",f"OMP session {session.name} {terminal_status} (exit {code})") if (session.platform and session.chat and not outbox.pending()) else None
+        if notification:
+            deliverable={key:value for key,value in notification.items() if key != "dedup_key"}
+            try: bridge.deliver(deliverable); runtime.commit_notification(notification["dedup_key"])
+            except Exception:
+                if outbox.enqueue(deliverable["event_id"],deliverable): runtime.queue_notification(notification["dedup_key"])
         terminal_state_saved=True
+        if outbox_path.exists() and not outbox.items:
+            outbox_path.unlink(missing_ok=True)
         return code
     except BaseException as exc:
         body_error=exc

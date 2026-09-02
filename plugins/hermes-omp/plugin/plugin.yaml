@@ -3,3 +3,5 @@ version: 0.3.0rc1
 description: "Durable Oh My Pi RPC supervision through Hermes public CLI and messaging interfaces."
 author: hermes-omp contributors
 hooks: []
+dashboard:
+  api: dashboard/plugin_api.py

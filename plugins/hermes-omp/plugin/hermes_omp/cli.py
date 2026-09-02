@@ -66,7 +66,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     parser.description = "Durable OMP supervision"
     sub = parser.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor"); _json(doctor); doctor.add_argument("--fix", action="store_true"); doctor.add_argument("--dry-run", action="store_true")
-    create = sub.add_parser("create"); create.add_argument("name"); create.add_argument("--cwd", required=True); create.add_argument("--model", required=True); create.add_argument("--mission", required=True); create.add_argument("--project", default=""); create.add_argument("--platform", default=""); create.add_argument("--chat", default=""); create.add_argument("--topic", default=""); create.add_argument("--allowed-user", action="append", default=[]); create.add_argument("--resume", default=""); create.add_argument("--restart-policy", choices=["never", "on-failure", "always"], default="on-failure"); create.add_argument("--policy", choices=VALID_POLICY_PROFILES, default="interactive"); create.add_argument("--omp-path", default="omp"); create.add_argument("--omp-option", action="append", default=[]); create.add_argument("--no-install", action="store_true"); create.add_argument("--start", action="store_true"); create.add_argument("--dry-run", action="store_true"); _json(create)
+    create = sub.add_parser("create"); create.add_argument("name"); create.add_argument("--cwd", required=True); create.add_argument("--model", required=True); create.add_argument("--mission", required=True); create.add_argument("--project", default=""); create.add_argument("--platform", default=""); create.add_argument("--chat", default=""); create.add_argument("--topic", default=""); create.add_argument("--allowed-user", action="append", default=[]); create.add_argument("--resume", default=""); create.add_argument("--restart-policy", choices=["never", "on-failure", "always"], default="on-failure"); create.add_argument("--policy", choices=VALID_POLICY_PROFILES, default="interactive"); create.add_argument("--omp-path", default="omp"); create.add_argument("--omp-option", action="append", default=[]); create.add_argument("--notify", action="append", choices=["question", "error", "milestone", "completion", "restart"]); create.add_argument("--no-notify", action="append", choices=["question", "error", "milestone", "completion", "restart"], default=[]); create.add_argument("--max-duration", type=float, default=0.0); create.add_argument("--max-restarts", type=int, default=0); create.add_argument("--restart-window", type=float, default=0.0); create.add_argument("--restart-cooldown", type=float, default=0.0); create.add_argument("--max-tokens", type=int, default=0); create.add_argument("--max-cost-usd", type=float, default=0.0); create.add_argument("--no-install", action="store_true"); create.add_argument("--start", action="store_true"); create.add_argument("--dry-run", action="store_true"); _json(create)
     adopt = sub.add_parser("adopt"); adopt.add_argument("name"); adopt.add_argument("--inspection", required=True); adopt.add_argument("--mission", required=True); adopt.add_argument("--platform", default=""); adopt.add_argument("--chat", default=""); adopt.add_argument("--topic", default=""); adopt.add_argument("--allowed-user", action="append", default=[]); adopt.add_argument("--restart-policy", choices=["never", "on-failure", "always"], default="on-failure"); adopt.add_argument("--policy", choices=VALID_POLICY_PROFILES, default="interactive"); adopt.add_argument("--omp-path", default="omp"); adopt.add_argument("--no-install", action="store_true"); adopt.add_argument("--start", action="store_true"); adopt.add_argument("--dry-run", action="store_true"); _json(adopt)
     listing = sub.add_parser("list"); _json(listing)
     status = sub.add_parser("status"); status.add_argument("name"); _json(status)
@@ -248,8 +248,32 @@ def _queue_summary(paths: Paths, name: str) -> tuple[dict[str, int], str]:
 def _status(session: Session, paths: Paths) -> dict[str, Any]:
     result = dataclasses.asdict(session); queues, last_error = _queue_summary(paths, session.name)
     live = _owner_live(paths, session.name)
-    result.update({"health": "degraded" if last_error or queues["outbound_dead"] or queues["prompt_dead"] else ("healthy" if live else "stopped"), "active": live, "queues": queues, "last_error": str(redact(last_error)), "last_activity": session.last_activity})
+    result.update({"health": "degraded" if last_error or queues["outbound_dead"] or queues["prompt_dead"] else ("healthy" if live else "stopped"), "active": live, "queues": queues, "last_error": str(redact(last_error)), "last_activity": session.last_activity, "budgets":_budget_snapshot(session,paths), "notifications":dict(session.notifications)})
     return result
+
+
+def _budget_snapshot(session: Session, paths: Paths) -> dict[str, Any]:
+    state_path=paths.run/f"{session.name}.runtime.json"
+    try: state=json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError,ValueError,TypeError): state={}
+    elapsed=max(0.0,time.time()-float(state.get("started_at",time.time()))) if state else 0.0
+    duration={"state":"unlimited" if not session.max_duration_seconds else ("exceeded" if elapsed>session.max_duration_seconds else "within_limit"),"elapsed_seconds":elapsed,"limit":session.max_duration_seconds}
+    unavailable={"state":"unavailable","enforceable":False,"reason":"trustworthy_public_rpc_usage_unavailable"}
+    return {"duration":duration,"tokens":dict(unavailable) if session.max_tokens else {"state":"unlimited","enforceable":False},"cost":dict(unavailable) if session.max_cost_usd else {"state":"unlimited","enforceable":False}}
+
+
+def dashboard_snapshot(paths: Paths, log_limit: int = 20) -> dict[str, Any]:
+    store = SessionStore(paths, read_only=True)
+    sessions=[]; questions=[]; logs=[]
+    for session in store.list():
+        sessions.append(redact(_status(session, paths)))
+        question=paths.run/f"{session.name}.question.json"
+        if question.exists():
+            try: questions.append({"session":session.name,**redact(json.loads(question.read_text(encoding="utf-8")))})
+            except (OSError,ValueError,TypeError): questions.append({"session":session.name,"error":"unreadable"})
+        records=list(iter_log_records(paths.logs/f"{session.name}.jsonl"))[-max(0,log_limit):]
+        logs.extend({"session":session.name,"record":redact(record)} for record in records)
+    return {"read_only":True,"actions_require_confirmation":True,"sessions":sessions,"questions":questions,"logs":logs[-max(0,log_limit):],"telemetry":False}
 
 
 def _read_json_files(path: Path, status: str, queue: str) -> list[dict[str, Any]]:
@@ -476,7 +500,7 @@ def _archive(session: Session, paths: Paths) -> dict[str, Any]:
         try:
             raw = json.loads(runtime.read_text()); safe_runtime = {k: redact(v) for k, v in raw.items() if k in {"question", "seen_event_ids"}}
         except ValueError: safe_runtime = {}
-    return {"archive_version": ARCHIVE_VERSION, "created_by": __version__, "session": redact(data), "omp_path": omp_path.read_text().strip() if omp_path.exists() else "omp", "runtime": safe_runtime}
+    return {"archive_version": ARCHIVE_VERSION, "created_by": __version__, "session": data, "omp_path": omp_path.read_text().strip() if omp_path.exists() else "omp", "runtime": safe_runtime}
 
 
 def _load_hmac_key(args: argparse.Namespace) -> Optional[bytes]:
@@ -583,7 +607,10 @@ def _dispatch(args: argparse.Namespace, paths: Paths) -> int:
         if args.command == "create":
             cwd = Path(args.cwd).expanduser().resolve()
             if not cwd.is_dir(): raise CliError(f"cwd does not exist: {cwd}", "validation", EXIT_VALIDATION)
-            session = Session.new(name=args.name, cwd=str(cwd), model=args.model, mission=args.mission, project=args.project, platform=args.platform, chat=args.chat, topic=args.topic, allowed_users=args.allowed_user, restart_policy=args.restart_policy, omp_session_id=args.resume, plugin_version=__version__, hermes_version=_version([os.environ.get("HERMES_OMP_HERMES", "hermes"), "--version"]), omp_version=_version([args.omp_path, "--version"]), omp_options=args.omp_option, policy_profile=args.policy)
+            notifications={kind:kind not in args.no_notify for kind in ("question","error","milestone","completion","restart")}
+            session = Session.new(name=args.name, cwd=str(cwd), model=args.model, mission=args.mission, project=args.project, platform=args.platform, chat=args.chat, topic=args.topic, allowed_users=args.allowed_user, restart_policy=args.restart_policy, omp_session_id=args.resume, plugin_version=__version__, hermes_version=_version([os.environ.get("HERMES_OMP_HERMES", "hermes"), "--version"]), omp_version=_version([args.omp_path, "--version"]), omp_options=args.omp_option, policy_profile=args.policy, notifications=notifications, max_duration_seconds=args.max_duration, max_restarts=args.max_restarts, restart_window_seconds=args.restart_window, restart_cooldown_seconds=args.restart_cooldown, max_tokens=args.max_tokens, max_cost_usd=args.max_cost_usd)
+            errors=validate_session(session)
+            if errors: raise CliError("; ".join(errors),"validation",EXIT_VALIDATION)
         else:
             try: data = json.loads(Path(args.inspection).read_text()); info = inspect_adoption(list(data["argv"]), str(data["cwd"]))
             except (OSError, ValueError, KeyError, TypeError) as exc: raise CliError("invalid adoption inspection", "validation", EXIT_VALIDATION) from exc

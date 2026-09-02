@@ -82,6 +82,8 @@ def test_source_archive_contains_self_contained_plugin(tmp_path: Path) -> None:
         "/src/hermes_omp/__init__.py",
         "/plugin/plugin.yaml",
         "/plugin/__init__.py",
+        "/plugin/desktop/plugin.js",
+        "/plugin/dashboard/plugin_api.py",
         "/skills/omp-service/SKILL.md",
         "/docs/INSTALL.md",
         "/tests/test_plugin.py",

@@ -60,7 +60,7 @@ run_for_plugins() {
     case "$operation" in
       test)
         python="$(prepare_venv "$dir")"
-        (cd "$dir" && "$python" -m pytest -q)
+        (cd "$dir" && PYTHONPATH="$dir/src${PYTHONPATH:+:$PYTHONPATH}" "$python" -m pytest -q)
         ;;
       build)
         python="$(prepare_venv "$dir")"

@@ -58,7 +58,14 @@ Never place credentials in command arguments. Hermes owns channel credentials.
 - Export files omit live PID fields and owner locks and apply heuristic redaction, but still contain session configuration and may contain sensitive paths, prompts, options, executable locations, or unrecognized secrets. Optional HMAC-SHA256 authentication detects modification but does not encrypt content; pass keys only through `--hmac-key-file` or `--hmac-key-env` references.
 - `hermes omp update` changes stored session configuration. It does not upgrade the `hermes-omp` distribution or replace the native `omp` plugin directory.
 - Approval profiles are stored with each session. `balanced` and `night` can automatically answer only choices already classified safe, recommended, and reversible; `interactive` and `strict` require explicit handling. Recognized sensitive actions are never automatic.
+- Notification controls are per kind: question, error, milestone, completion, and restart. Use repeatable `--no-notify KIND` on create; deduplication fingerprints persist across supervisor restarts.
+- Duration and restart-window/cooldown budgets are enforced locally. Token/cost caps fail closed because this release has no trustworthy documented public OMP usage RPC; status reports them as unavailable rather than estimating usage.
+- Transition records are bounded, redacted local NDJSON at `$HERMES_HOME/omp/logs/NAME.transitions.ndjson`. No telemetry is emitted.
 - `migrate-legacy` reads only an explicit reviewed JSON record or documented profile-local candidates. It never inspects or stops a legacy process, and it writes nothing unless `--apply` is present.
+
+## Desktop dashboard
+
+The unified plugin includes `plugin/desktop/plugin.js` and `plugin/dashboard/plugin_api.py` using the documented public Desktop Plugin SDK. Enable both the Python plugin and the opt-in Desktop half in Settings → Plugins. The OMP page is read-only by default and shows sessions, health, pending questions, and bounded redacted log summaries. Any action opens a confirmation dialog and can only request a validated `hermes omp` CLI contract; the backend does not execute subprocesses.
 
 ## Development
 

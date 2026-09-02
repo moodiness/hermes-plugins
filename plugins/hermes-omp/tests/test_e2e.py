@@ -78,7 +78,7 @@ def test_fake_process_queue_resume_and_service_definition_integration(tmp_path: 
         proc.wait(timeout=10); assert proc.returncode==0
 
         recovery=spawn([sys.executable,"-m","hermes_omp.runtime","demo","--root",str(paths.root)],env=env)
-        wait_for(lambda:(bridge/"delivered.jsonl").exists())
+        wait_for(lambda:(bridge/"delivered.jsonl").exists() and any("q-001" in line for line in (bridge/"delivered.jsonl").read_text().splitlines()))
         stop_process(recovery)
         delivered=[json.loads(x) for x in (bridge/"delivered.jsonl").read_text().splitlines()]
         messages=[x["message"] for x in delivered]

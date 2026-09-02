@@ -2,6 +2,10 @@
 
 Session settings are explicit `hermes omp create` flags: cwd/project, model, OMP options, destination platform/chat/topic, allowed users, mission, resume id, executable path, restart policy, and approval policy. `hermes omp update` changes only its mutable session fields; it is not a package or plugin upgrade.
 
+Notification kinds default on and can be disabled independently with repeatable `--no-notify question|error|milestone|completion|restart`. Durable fingerprints prevent duplicate delivery attempts after runtime restart. `--max-duration`, `--max-restarts`, `--restart-window`, and `--restart-cooldown` are non-negative local budgets. `--max-tokens` and `--max-cost-usd` are accepted only as fail-closed declarations: this release does not claim a trustworthy documented public OMP usage RPC, so configured nonzero usage caps prevent runtime start and report `trustworthy_public_rpc_usage_unavailable`.
+
+The supervisor writes bounded redacted transition NDJSON locally. It performs no telemetry or external analytics. The optional Desktop dashboard polls the scoped plugin backend every five seconds and remains read-only unless a user confirms a validated safe action contract.
+
 State lives at `<active-HERMES_HOME>/omp`. Generated services carry that exact directory as the internal runtime's required `--root` argument instead of rediscovering it from a service manager's ambient profile. They also carry `--expected-session-id`; the runtime compares it to the loaded record before acquiring ownership. This is an identity handoff and state-race check, not OS-level process identity proof.
 
 ## Approval profiles

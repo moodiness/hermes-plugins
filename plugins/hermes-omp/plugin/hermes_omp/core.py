@@ -15,6 +15,8 @@ from typing import Any, Callable, Optional
 
 SCHEMA_VERSION = 2
 VALID_POLICY_PROFILES = ("interactive", "balanced", "night", "strict")
+NOTIFICATION_KINDS = ("question", "error", "milestone", "completion", "restart")
+DEFAULT_NOTIFICATIONS = {kind: True for kind in NOTIFICATION_KINDS}
 RISKY = re.compile(r"\b(push|publish|release|post|comment|review|merge|deploy|delete|remove|destroy|drop|secret|credentials?|password|token|permissions?|privileged|authoriz(?:e|ation)|payment|purchase|sudo|shell|system command)\b", re.I)
 _SECRET_PATTERNS = [
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
@@ -207,14 +209,23 @@ class Session:
     omp_version: str
     created_at: float
     policy_profile: str = "interactive"
+    notifications: dict[str, bool] = dataclasses.field(default_factory=lambda: dict(DEFAULT_NOTIFICATIONS))
+    max_duration_seconds: float = 0.0
+    max_restarts: int = 0
+    restart_window_seconds: float = 0.0
+    restart_cooldown_seconds: float = 0.0
+    max_tokens: int = 0
+    max_cost_usd: float = 0.0
 
     @classmethod
-    def new(cls, *, name: str, cwd: str, model: str, mission: str, platform: str = "", chat: str = "", topic: str = "", restart_policy: str = "on-failure", omp_session_id: str = "", plugin_version: str = "0.1.0rc1", hermes_version: str = "", omp_version: str = "", project: str = "", omp_options: Optional[list[str]] = None, allowed_users: Optional[list[str]] = None, policy_profile: str = "interactive") -> "Session":
+    def new(cls, *, name: str, cwd: str, model: str, mission: str, platform: str = "", chat: str = "", topic: str = "", restart_policy: str = "on-failure", omp_session_id: str = "", plugin_version: str = "0.3.0rc1", hermes_version: str = "", omp_version: str = "", project: str = "", omp_options: Optional[list[str]] = None, allowed_users: Optional[list[str]] = None, policy_profile: str = "interactive", notifications: Optional[dict[str, bool]] = None, max_duration_seconds: float = 0.0, max_restarts: int = 0, restart_window_seconds: float = 0.0, restart_cooldown_seconds: float = 0.0, max_tokens: int = 0, max_cost_usd: float = 0.0) -> "Session":
         if policy_profile not in VALID_POLICY_PROFILES:
             raise ValueError("invalid policy_profile")
         name = slug(name)
         now = time.time()
-        return cls(SCHEMA_VERSION, hashlib.sha256(f"{name}\0{now}\0{secrets.token_hex(8)}".encode()).hexdigest()[:24], name, omp_session_id, str(Path(cwd).expanduser().resolve()), project or Path(cwd).name, model, omp_options or [], platform, str(chat), str(topic), [str(x) for x in (allowed_users or [])], mission, "created", now, 0, 0, restart_policy, plugin_version, hermes_version, omp_version, now, policy_profile)
+        notification_values = dict(DEFAULT_NOTIFICATIONS)
+        notification_values.update(notifications or {})
+        return cls(SCHEMA_VERSION, hashlib.sha256(f"{name}\0{now}\0{secrets.token_hex(8)}".encode()).hexdigest()[:24], name, omp_session_id, str(Path(cwd).expanduser().resolve()), project or Path(cwd).name, model, omp_options or [], platform, str(chat), str(topic), [str(x) for x in (allowed_users or [])], mission, "created", now, 0, 0, restart_policy, plugin_version, hermes_version, omp_version, now, policy_profile, notification_values, float(max_duration_seconds), int(max_restarts), float(restart_window_seconds), float(restart_cooldown_seconds), int(max_tokens), float(max_cost_usd))
 
 
 class SessionStore:
@@ -298,7 +309,7 @@ class SessionStore:
         version = int(data.get("schema_version", 1))
         if version > SCHEMA_VERSION:
             raise ValueError(f"unsupported schema version {version}")
-        if version == 1:
+        if version < SCHEMA_VERSION:
             defaults = dataclasses.asdict(Session.new(name=data["name"], cwd=data["cwd"], model=data.get("model", ""), mission=data.get("mission", "")))
             defaults.update(data)
             defaults["schema_version"] = SCHEMA_VERSION
@@ -334,6 +345,9 @@ def validate_session(session: Session) -> list[str]:
     if not isinstance(session.omp_options, list) or not all(isinstance(x, str) for x in session.omp_options): errors.append("omp_options must be strings")
     if not isinstance(session.allowed_users, list) or not all(isinstance(x, str) for x in session.allowed_users): errors.append("allowed_users must be strings")
     if session.policy_profile not in VALID_POLICY_PROFILES: errors.append("invalid policy_profile")
+    if set(session.notifications) != set(NOTIFICATION_KINDS) or not all(isinstance(value, bool) for value in session.notifications.values()): errors.append("notifications must contain boolean question,error,milestone,completion,restart controls")
+    budget_values=(session.max_duration_seconds,session.max_restarts,session.restart_window_seconds,session.restart_cooldown_seconds,session.max_tokens,session.max_cost_usd)
+    if not all(isinstance(value,(int,float)) and not isinstance(value,bool) and value >= 0 for value in budget_values): errors.append("budgets must be non-negative numbers")
     return errors
 
 
