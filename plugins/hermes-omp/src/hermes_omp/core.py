@@ -58,13 +58,7 @@ def _path_lock(path: Path):
 
             lock_path = path.with_name(path.name + ".lock")
             lock_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                handle = lock_path.open("r+b")
-            except FileNotFoundError:
-                try:
-                    handle = lock_path.open("x+b")
-                except FileExistsError:
-                    handle = lock_path.open("r+b")
+            handle = lock_path.open("a+b")
             locked = False
             try:
                 handle.seek(0, os.SEEK_END)
